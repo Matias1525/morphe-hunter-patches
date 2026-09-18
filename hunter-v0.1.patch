@@ -46,7 +46,7 @@ new file mode 100644
 index 0000000..1f47716
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,389 @@
 +/*
 + * YouTube Hunter experimental filter for Morphe.
 + * Diagnostic-first implementation: search results only.
@@ -54,6 +54,8 @@ index 0000000..1f47716
 +package app.morphe.extension.youtube.patches.components;
 +
 +import java.nio.charset.StandardCharsets;
++import java.util.ArrayDeque;
++import java.util.Deque;
 +import java.util.concurrent.ConcurrentHashMap;
 +import java.util.concurrent.atomic.AtomicInteger;
 +import java.util.regex.Matcher;
@@ -72,18 +74,19 @@ index 0000000..1f47716
 +/**
 + * Experimental YouTube Hunter filter.
 + *
-+ * v0.1.4 goals:
++ * v0.1.5 goals:
 + * - Keep duration and Shorts filtering local and realtime.
 + * - Observe Morphe's |badge.e auto-dub signal.
-+ * - Associate child auto-dub badges with the most recently rendered search card
-+ *   on the same Litho layout thread when the badge buffer does not contain a video ID.
-+ * - Remain fail-open for unknown audio associations until the correlation is proven.
++ * - Correlate child auto-dub badges to recently rendered search cards using the
++ *   actual Litho component path, preferring exact parent-path containment.
++ * - Keep audio filtering fail-open until path correlation is proven on-device.
 + */
 +@SuppressWarnings("unused")
 +public final class HunterFilter extends Filter {
 +    private static final String TAG = "HUNTER";
-+    private static final long RECENT_CARD_TTL_MS = 1500L;
-+    private static final int MAX_DIAGNOSTIC_TOASTS = 8;
++    private static final long RECENT_CARD_TTL_MS = 2500L;
++    private static final int MAX_RECENT_CARDS = 16;
++    private static final int MAX_DIAGNOSTIC_TOASTS = 12;
 +
 +    private final StringFilterGroup searchCards = new StringFilterGroup(
 +            Settings.HUNTER_ENABLED,
@@ -104,7 +107,8 @@ index 0000000..1f47716
 +
 +    private static final ConcurrentHashMap<String, Boolean> AUTO_DUB_BY_VIDEO_ID =
 +            new ConcurrentHashMap<>();
-+    private static final ThreadLocal<RecentCard> LAST_SEARCH_CARD = new ThreadLocal<>();
++    private static final ThreadLocal<Deque<RecentCard>> RECENT_SEARCH_CARDS =
++            ThreadLocal.withInitial(ArrayDeque::new);
 +    private static final AtomicInteger DIAGNOSTIC_TOAST_COUNT = new AtomicInteger();
 +
 +    private static final Pattern DURATION_TOKEN = Pattern.compile(
@@ -154,11 +158,7 @@ index 0000000..1f47716
 +        if (contentIndex != 0) return false;
 +
 +        if (directVideoId != null) {
-+            LAST_SEARCH_CARD.set(new RecentCard(
-+                    directVideoId,
-+                    path,
-+                    System.currentTimeMillis()
-+            ));
++            rememberSearchCard(directVideoId, path);
 +        }
 +
 +        final boolean autoDubInCard = containsAny(ascii, AUTO_DUB_MARKERS)
@@ -213,14 +213,25 @@ index 0000000..1f47716
 +                return false;
 +            }
 +
-+            // Diagnostic v0.1.4 remains fail-open. A negative result is not considered
-+            // verified merely because its badge has not rendered yet.
 +            Logger.printDebug(() -> TAG
 +                    + " auto-dub not associated yet id=" + directVideoId
-+                    + "; keeping in diagnostic v0.1.4");
++                    + "; keeping in diagnostic v0.1.5");
 +        }
 +
 +        return false;
++    }
++
++    private static void rememberSearchCard(String videoId, String path) {
++        Deque<RecentCard> cards = RECENT_SEARCH_CARDS.get();
++        long now = System.currentTimeMillis();
++        pruneRecentCards(cards, now);
++
++        cards.removeIf(card -> videoId.equals(card.videoId));
++        cards.addLast(new RecentCard(videoId, path, now));
++
++        while (cards.size() > MAX_RECENT_CARDS) {
++            cards.removeFirst();
++        }
 +    }
 +
 +    private static void observeAutoDubBadge(String path,
@@ -234,19 +245,23 @@ index 0000000..1f47716
 +
 +        String resolvedVideoId = directVideoId;
 +        String associationSource = "badge-buffer";
++        RecentCard matchedCard = null;
 +
 +        if (resolvedVideoId == null) {
-+            RecentCard recent = LAST_SEARCH_CARD.get();
-+            if (recent != null
-+                    && System.currentTimeMillis() - recent.seenAtMs <= RECENT_CARD_TTL_MS
-+                    && pathsAreCompatible(recent.path, path)) {
-+                resolvedVideoId = recent.videoId;
-+                associationSource = "same-layout-thread-recent-card";
++            Deque<RecentCard> cards = RECENT_SEARCH_CARDS.get();
++            long now = System.currentTimeMillis();
++            pruneRecentCards(cards, now);
++
++            matchedCard = findBestPathMatch(cards, path);
++            if (matchedCard != null) {
++                resolvedVideoId = matchedCard.videoId;
++                associationSource = "litho-path-parent";
 +            }
 +        }
 +
 +        final String finalVideoId = resolvedVideoId;
 +        final String finalAssociationSource = associationSource;
++        final RecentCard finalMatchedCard = matchedCard;
 +
 +        if (finalVideoId != null) {
 +            markAutoDub(finalVideoId, finalAssociationSource);
@@ -257,9 +272,72 @@ index 0000000..1f47716
 +                    + " badge radar=true id="
 +                    + (finalVideoId == null ? "?" : finalVideoId)
 +                    + " source=" + finalAssociationSource
-+                    + " path=" + path
++                    + " cardPath=" + (finalMatchedCard == null ? "?" : finalMatchedCard.path)
++                    + " badgePath=" + path
 +                    + " accessibility=" + truncate(accessibility, 220)
 +                    + " ascii=" + truncate(ascii, 900));
++
++            if (DIAGNOSTIC_TOAST_COUNT.getAndIncrement() < MAX_DIAGNOSTIC_TOASTS) {
++                Utils.showToastShort(
++                        "Hunter badge "
++                                + (finalVideoId == null ? "?" : finalVideoId)
++                                + " [" + finalAssociationSource + "]"
++                                + " cp=" + pathFingerprint(finalMatchedCard == null ? null : finalMatchedCard.path)
++                                + " bp=" + pathFingerprint(path)
++                );
++            }
++        }
++    }
++
++    private static RecentCard findBestPathMatch(Deque<RecentCard> cards, String badgePath) {
++        if (badgePath == null || badgePath.isEmpty()) return null;
++
++        RecentCard best = null;
++        int bestScore = -1;
++
++        for (RecentCard card : cards) {
++            if (card.path == null || card.path.isEmpty()) continue;
++
++            int score = pathMatchScore(card.path, badgePath);
++            if (score > bestScore) {
++                best = card;
++                bestScore = score;
++            }
++        }
++
++        return bestScore > 0 ? best : null;
++    }
++
++    private static int pathMatchScore(String cardPath, String badgePath) {
++        if (badgePath.startsWith(cardPath)) {
++            return 100000 + cardPath.length();
++        }
++
++        String family = searchCardFamily(cardPath);
++        if (family == null || !badgePath.contains(family)) {
++            return -1;
++        }
++
++        int common = commonPrefixLength(cardPath, badgePath);
++        return 1000 + common;
++    }
++
++    private static int commonPrefixLength(String a, String b) {
++        int max = Math.min(a.length(), b.length());
++        int i = 0;
++        while (i < max && a.charAt(i) == b.charAt(i)) {
++            i++;
++        }
++        return i;
++    }
++
++    private static void pruneRecentCards(Deque<RecentCard> cards, long now) {
++        while (!cards.isEmpty()) {
++            RecentCard first = cards.peekFirst();
++            if (first == null || now - first.seenAtMs <= RECENT_CARD_TTL_MS) {
++                break;
++            }
++            cards.removeFirst();
 +        }
 +    }
 +
@@ -270,19 +348,14 @@ index 0000000..1f47716
 +        Logger.printDebug(() -> TAG
 +                + " auto-dub associated id=" + videoId
 +                + " source=" + source);
-+
-+        if (Settings.HUNTER_DEBUG_LOGS.get()
-+                && DIAGNOSTIC_TOAST_COUNT.getAndIncrement() < MAX_DIAGNOSTIC_TOASTS) {
-+            Utils.showToastShort("Hunter auto-dub: " + videoId);
-+        }
 +    }
 +
-+    private static boolean pathsAreCompatible(String cardPath, String badgePath) {
-+        if (cardPath == null || badgePath == null) return false;
-+
-+        String cardFamily = searchCardFamily(cardPath);
-+        String badgeFamily = searchCardFamily(badgePath);
-+        return cardFamily != null && cardFamily.equals(badgeFamily);
++    private static String pathFingerprint(String path) {
++        if (path == null || path.isEmpty()) return "?";
++        int hash = path.hashCode();
++        String family = searchCardFamily(path);
++        String familyLabel = family == null ? "none" : family;
++        return familyLabel + ":" + Integer.toHexString(hash);
 +    }
 +
 +    private static String searchCardFamily(String path) {
@@ -464,7 +537,7 @@ index d890d5b..d579002 100644
 +    <string name="morphe_hunter_hide_shorts_title">Ocultar Shorts en búsqueda</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Oculta tarjetas que contienen marcadores conocidos de Shorts</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Exigir marcador de doblaje automático</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.4: asocia el badge de doblaje automático usando el hilo de render de Litho. Las asociaciones desconocidas se conservan para evitar falsos negativos</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.5: correlaciona el badge de doblaje automático con la tarjeta usando la ruta real de Litho. Las asociaciones desconocidas se conservan durante el diagnóstico</string>
 +
  </resources>
 diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml b/patches/src/main/resources/addresources/values/youtube/strings.xml
@@ -488,6 +561,6 @@ index d26795f..b9843b3 100644
 +    <string name="morphe_hunter_hide_shorts_title">Hide Shorts in search</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Hides search cards that contain known Shorts markers</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Require auto-dub marker</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.4: associates the auto-dub badge using Litho render-thread correlation. Unknown associations are kept to avoid false negatives</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.5: correlates the auto-dub badge to its card using the real Litho component path. Unknown associations remain visible during diagnostics</string>
 +
  </resources>
