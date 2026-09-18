@@ -1,0 +1,52 @@
+name: Diagnose Hunter Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/diagnose-bundle.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Hunter and official bundles
+        run: |
+          curl -fL -o hunter.mpp "https://github.com/Matias1525/morphe-hunter-patches/releases/download/v0.1.1/patches-hunter-v0.1.1.mpp"
+          curl -fL -o official.mpp "https://github.com/MorpheApp/morphe-patches/releases/download/v1.44.0-dev.4/patches-1.44.0-dev.4.mpp"
+          ls -lh hunter.mpp official.mpp
+
+      - name: Compare archive structure
+        run: |
+          echo "=== HUNTER MANIFEST ==="
+          unzip -p hunter.mpp META-INF/MANIFEST.MF || true
+          echo
+          echo "=== OFFICIAL MANIFEST ==="
+          unzip -p official.mpp META-INF/MANIFEST.MF || true
+          echo
+          echo "=== HUNTER DEX ENTRIES ==="
+          unzip -l hunter.mpp | grep -Ei '\.dex$' || true
+          echo
+          echo "=== OFFICIAL DEX ENTRIES ==="
+          unzip -l official.mpp | grep -Ei '\.dex$' || true
+          echo
+          echo "=== HUNTER TOP LEVEL ==="
+          unzip -l hunter.mpp | head -n 80
+          echo
+          echo "=== OFFICIAL TOP LEVEL ==="
+          unzip -l official.mpp | head -n 80
+
+      - name: Verify Hunter symbols
+        run: |
+          rm -rf hunter_unpack
+          mkdir hunter_unpack
+          cd hunter_unpack
+          unzip -q ../hunter.mpp
+          echo "Searching archive for Hunter symbols..."
+          grep -R -a -n -m 5 "YouTube Hunter" . || true
+          grep -R -a -n -m 5 "youtubeHunterPatch" . || true
+          grep -R -a -n -m 5 "HunterFilter" . || true
