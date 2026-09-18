@@ -1,30 +1,28 @@
 # Morphe Hunter Patches
 
-Experimental YouTube Hunter patch layer for Morphe.
+Experimental YouTube Hunter patch source for Morphe.
 
-## Goal
+## Remote source
 
-Keep YouTube's own search/recommendation system and filter the rendered results locally inside Morphe.
+After the repository is public, add this in Morphe Manager:
 
-Initial experimental scope:
-- YouTube search results only
-- Hunter enable/disable switch
+`github.com/Matias1525/morphe-hunter-patches`
+
+Morphe reads `patches-bundle.json` and downloads the latest released `.mpp`.
+
+## Current scope
+
+- Search results only
+- Hunter on/off
 - Diagnostic logs
-- Minimum duration filter
+- Minimum duration
 - Hide Shorts
-- Require Morphe's auto-dub radar marker
+- Require auto-dub marker
 
-## Build model
+## Update flow
 
-This repository does **not** duplicate the full Morphe source tree.
+GitHub Actions builds a new `.mpp`, publishes a release, and refreshes `patches-bundle.json`. Morphe can then see the update from the same remote source.
 
-GitHub Actions:
-1. clones the exact upstream Morphe Patches tag,
-2. applies `hunter-v0.1.patch`,
-3. builds the Morphe patch bundle,
-4. uploads the generated `.mpp` as an artifact.
-
-Upstream base: `MorpheApp/morphe-patches`
-Target base tag: `v1.44.0-dev.4`
-
-This keeps the Hunter changes small and makes rebasing onto future Morphe versions much easier.
+Upstream: `MorpheApp/morphe-patches`
+Target upstream tag: `v1.44.0-dev.4`
+Hunter version: see `VERSION`.
