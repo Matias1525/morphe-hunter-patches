@@ -8,8 +8,6 @@ on:
       - "hunter-v0.1.patch"
       - "VERSION"
       - ".github/workflows/build-hunter.yml"
-  pull_request:
-    branches: [ main ]
 
 permissions:
   contents: write
@@ -32,50 +30,48 @@ jobs:
 
       - name: Read Hunter version
         id: version
+        shell: bash
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
-          if [ -z "$VERSION" ]; then
-            echo "VERSION file is empty"
-            exit 1
-          fi
+          test -n "$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Clone Morphe Patches
+        shell: bash
         run: |
           git clone --depth 1 --branch "$UPSTREAM_TAG" "$UPSTREAM_REPO" upstream
 
       - name: Apply Hunter patch
+        shell: bash
         run: |
           cd upstream
           git apply --check ../hunter-v0.1.patch
           git apply ../hunter-v0.1.patch
-          echo "Applied Hunter patch to $UPSTREAM_TAG"
 
-      - name: Brand Hunter bundle
+      - name: Brand and version Hunter bundle
         env:
           HUNTER_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
           import os, re
 
           version = os.environ["HUNTER_VERSION"]
+
           props = Path("upstream/gradle.properties")
-          text = props.read_text()
-          text = re.sub(r"(?m)^version\s*=\s*.*$", f"version = {version}", text)
-          props.write_text(text)
+          s = props.read_text()
+          s = re.sub(r"(?m)^version\s*=\s*.*$", f"version = {version}", s)
+          props.write_text(s)
 
           build = Path("upstream/patches/build.gradle.kts")
-          text = build.read_text()
-          text = text.replace('name = "Morphe Patches"', 'name = "Morphe Hunter Patches"')
-          text = text.replace('description = "Patches for Morphe"', 'description = "Morphe patches with YouTube Hunter Experimental"')
-          text = text.replace('source = "git@github.com:MorpheApp/morphe-patches.git"', 'source = "https://github.com/Matias1525/morphe-hunter-patches"')
-          text = text.replace('author = "MorpheApp"', 'author = "Matias1525 + MorpheApp"')
-          build.write_text(text)
-
-          print(props.read_text())
-          print(build.read_text().split("patches {", 1)[1].split("}", 1)[0])
+          s = build.read_text()
+          s = s.replace('name = "Morphe Patches"', 'name = "Morphe Hunter Patches"')
+          s = s.replace('description = "Patches for Morphe"', 'description = "Morphe patches with YouTube Hunter Experimental"')
+          s = s.replace('source = "git@github.com:MorpheApp/morphe-patches.git"', 'source = "https://github.com/Matias1525/morphe-hunter-patches"')
+          s = s.replace('author = "MorpheApp"', 'author = "Matias1525 + MorpheApp"')
+          build.write_text(s)
           PY
 
       - name: Setup Java 21
@@ -96,150 +92,48 @@ jobs:
         working-directory: upstream
         run: npm ci
 
-      - name: Make Gradle wrapper executable
+      - name: Make Gradle executable
         working-directory: upstream
         run: chmod +x gradlew
 
-      - name: Build Morphe runtime patch bundle
+      - name: Show relevant Gradle tasks
         working-directory: upstream
+        shell: bash
         run: |
-          echo "---- Relevant Gradle tasks ----"
-          ./gradlew :patches:tasks --all | grep -Ei '(^| )publish|dex|mpp' || true
-          echo "---- Publishing runtime bundle ----"
+          ./gradlew :patches:tasks --all | grep -Ei 'publish|dex|mpp|bundle' || true
+
+      - name: Build published runtime bundle
+        working-directory: upstream
+        shell: bash
+        run: |
           ./gradlew :patches:publish --stacktrace
-          echo "---- Build outputs ----"
-          find patches/build -maxdepth 4 -type f -print || true
+          find patches/build/libs -maxdepth 1 -type f -printf '%f\n' | sort
 
       - name: Collect and validate runtime MPP
+        shell: bash
         run: |
-          mkdir -p dist
           VERSION="${{ steps.version.outputs.version }}"
           MPP="upstream/patches/build/libs/patches-${VERSION}.mpp"
+          OUT="dist/patches-hunter-v${VERSION}.mpp"
 
-          echo "Available MPP files:"
-          find upstream/patches/build/libs -maxdepth 1 -type f -name '*.mpp' -printf '%f\n' | sort
-
+          mkdir -p dist
           if [ ! -f "$MPP" ]; then
-            echo "Expected runtime bundle was not produced: $MPP"
+            echo "Expected runtime bundle missing: $MPP"
             exit 1
           fi
 
-          echo "Runtime DEX entries:"
-          unzip -l "$MPP" | grep -Ei '\.dex
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: morphe-hunter-v${{ steps.version.outputs.version }}-mpp
-          path: dist/patches-hunter-v${{ steps.version.outputs.version }}.mpp
-          if-no-files-found: error
-          retention-days: 30
+          echo "=== Runtime MPP manifest ==="
+          unzip -p "$MPP" META-INF/MANIFEST.MF || true
+          echo "=== DEX entries ==="
+          unzip -l "$MPP" | grep -Ei '\.dex$' || true
 
-      - name: Create or update GitHub Release
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          FILE="dist/patches-hunter-v${{ steps.version.outputs.version }}.mpp"
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$FILE" --clobber
-          else
-            gh release create "$TAG" "$FILE" \
-              --title "YouTube Hunter v${{ steps.version.outputs.version }}" \
-              --notes "Experimental YouTube Hunter patch bundle for Morphe."
-          fi
-
-      - name: Refresh Morphe remote source metadata
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S')"
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/patches-hunter-v${VERSION}.mpp"
-
-          cat > patches-bundle.json <<EOF
-          {
-            "created_at": "$CREATED_AT",
-            "description": "YouTube Hunter Experimental patches for Morphe",
-            "download_url": "$DOWNLOAD_URL",
-            "signature_download_url": "",
-            "version": "$VERSION"
-          }
-          EOF
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add patches-bundle.json
-
-          if git diff --cached --quiet; then
-            echo "patches-bundle.json already current"
-          else
-            git commit -m "chore: update Morphe bundle metadata for v$VERSION"
-            git push origin HEAD:main
-          fi
- || true
-
-          if ! unzip -l "$MPP" | grep -qE 'classes([0-9]*)?\.dex
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: morphe-hunter-v${{ steps.version.outputs.version }}-mpp
-          path: dist/patches-hunter-v${{ steps.version.outputs.version }}.mpp
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Create or update GitHub Release
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          FILE="dist/patches-hunter-v${{ steps.version.outputs.version }}.mpp"
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$FILE" --clobber
-          else
-            gh release create "$TAG" "$FILE" \
-              --title "YouTube Hunter v${{ steps.version.outputs.version }}" \
-              --notes "Experimental YouTube Hunter patch bundle for Morphe."
-          fi
-
-      - name: Refresh Morphe remote source metadata
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S')"
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/patches-hunter-v${VERSION}.mpp"
-
-          cat > patches-bundle.json <<EOF
-          {
-            "created_at": "$CREATED_AT",
-            "description": "YouTube Hunter Experimental patches for Morphe",
-            "download_url": "$DOWNLOAD_URL",
-            "signature_download_url": "",
-            "version": "$VERSION"
-          }
-          EOF
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add patches-bundle.json
-
-          if git diff --cached --quiet; then
-            echo "patches-bundle.json already current"
-          else
-            git commit -m "chore: update Morphe bundle metadata for v$VERSION"
-            git push origin HEAD:main
-          fi
-; then
-            echo "ERROR: runtime MPP does not contain classes.dex. Refusing to publish a zero-patch bundle."
+          if ! unzip -l "$MPP" | grep -qE 'classes([0-9]*)?\.dex$'; then
+            echo "ERROR: MPP has no classes.dex. Not publishing a zero-patch bundle."
             exit 1
           fi
 
-          cp "$MPP" "dist/patches-hunter-v${VERSION}.mpp"
-          ls -lh dist/
+          cp "$MPP" "$OUT"
+          ls -lh "$OUT"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -250,25 +144,24 @@ jobs:
           retention-days: 30
 
       - name: Create or update GitHub Release
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          FILE="dist/patches-hunter-v${{ steps.version.outputs.version }}.mpp"
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          FILE="dist/patches-hunter-v${VERSION}.mpp"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$FILE" --clobber
           else
-            gh release create "$TAG" "$FILE" \
-              --title "YouTube Hunter v${{ steps.version.outputs.version }}" \
-              --notes "Experimental YouTube Hunter patch bundle for Morphe."
+            gh release create "$TAG" "$FILE"               --title "YouTube Hunter v${VERSION}"               --notes "Experimental YouTube Hunter patch bundle for Morphe."
           fi
 
       - name: Refresh Morphe remote source metadata
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
         run: |
           CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S')"
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/patches-hunter-v${VERSION}.mpp"
@@ -287,9 +180,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add patches-bundle.json
 
-          if git diff --cached --quiet; then
-            echo "patches-bundle.json already current"
-          else
-            git commit -m "chore: update Morphe bundle metadata for v$VERSION"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update Morphe bundle metadata for v$VERSION [skip ci]"
             git push origin HEAD:main
           fi
