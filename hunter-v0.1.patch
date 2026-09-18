@@ -4677,7 +4677,7 @@ diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/setti
 index 6c36913..bb20000 100644
 --- a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java
-@@ -1,103 +1,258 @@
+@@ -1,107 +1,262 @@
 -/*
 - * Copyright 2026 Morphe.
 - * https://github.com/MorpheApp/morphe-patches
@@ -4872,7 +4872,7 @@ index 6c36913..bb20000 100644
 +                String requestedScreen = intent.getStringExtra(HUNTER_SETTINGS_SCREEN_EXTRA);
 +                if (requestedScreen != null && !requestedScreen.isEmpty()) {
 +                    intent.removeExtra(HUNTER_SETTINGS_SCREEN_EXTRA);
-+                    ListView rootList = getListView();
++                    ListView rootList = getRootPreferenceListView();
 +                    if (rootList != null) {
 +                        rootList.post(() -> openPreferenceScreenPath(requestedScreen));
 +                    }
@@ -4883,7 +4883,12 @@ index 6c36913..bb20000 100644
 +        }
 +    }
 +
-+    private void openPreferenceScreenPath(String targetKey) {
++    private ListView getRootPreferenceListView() {
+        View rootView = getView();
+        return rootView == null ? null : rootView.findViewById(android.R.id.list);
+    }
+
+    private void openPreferenceScreenPath(String targetKey) {
 +        try {
 +            Preference target = findPreference(targetKey);
 +            PreferenceScreen root = getPreferenceScreen();
@@ -4898,7 +4903,7 @@ index 6c36913..bb20000 100644
 +                return;
 +            }
 +
-+            openPreferenceScreenPathStep(path, 0, getListView());
++            openPreferenceScreenPathStep(path, 0, getRootPreferenceListView());
 +        } catch (Exception ex) {
 +            Logger.printException(() -> "openPreferenceScreenPath failure", ex);
 +        }
