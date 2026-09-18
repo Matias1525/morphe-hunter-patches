@@ -1,0 +1,342 @@
+diff --git a/HUNTER_EXPERIMENTAL.md b/HUNTER_EXPERIMENTAL.md
+new file mode 100644
+index 0000000..bb14020
+--- /dev/null
++++ b/HUNTER_EXPERIMENTAL.md
+@@ -0,0 +1,37 @@
++# YouTube Hunter Experimental v0.1
++
++This branch adds an experimental Morphe patch named **YouTube Hunter (Experimental)**.
++
++## Scope
++
++The first build is deliberately diagnostic-first and only acts on YouTube search-result cards.
++
++Settings added under Morphe > General > YouTube Hunter (Experimental):
++
++- Enable YouTube Hunter
++- Hunter diagnostic logs
++- Minimum duration (minutes)
++- Hide Shorts in search
++- Require auto-dub marker
++
++## Safety defaults
++
++All destructive filters default to OFF. Hunter itself also defaults to OFF. Unknown duration is fail-open in v0.1 so an unrecognized card is not accidentally hidden.
++
++## Runtime signals
++
++The filter inspects Litho search-card protobuf/ASCII content and logs:
++
++- video ID from thumbnail URL
++- duration-like tokens
++- known Shorts markers
++- Morphe auto-dub radar markers
++- component path and truncated accessibility/ASCII context
++
++## Goal of v0.1
++
++Install this build, enable Hunter + diagnostic logs, run a few YouTube searches, and use the logs to confirm the exact duration and audio metadata exposed by YouTube 21.37.42 before enabling stricter filtering.
++
++## Build note
++
++The source package is ready, but the current build environment could not download Gradle from services.gradle.org due blocked outbound DNS/network access. Build the `.mpp` in a network-enabled environment or GitHub Actions.
+diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
+new file mode 100644
+index 0000000..1f47716
+--- /dev/null
++++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
+@@ -0,0 +1,165 @@
++/*
++ * YouTube Hunter experimental filter for Morphe.
++ * Diagnostic-first implementation: search results only.
++ */
++package app.morphe.extension.youtube.patches.components;
++
++import java.nio.charset.StandardCharsets;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++import app.morphe.extension.shared.Logger;
++import app.morphe.extension.shared.patches.components.BufferAsciiStrings;
++import app.morphe.extension.shared.patches.components.BufferPhraseFilter;
++import app.morphe.extension.shared.patches.components.ContextInterface;
++import app.morphe.extension.shared.patches.components.Filter;
++import app.morphe.extension.shared.patches.components.StringFilterGroup;
++import app.morphe.extension.youtube.settings.Settings;
++import app.morphe.extension.youtube.shared.NavigationBar;
++
++/**
++ * Experimental YouTube Hunter filter.
++ *
++ * Phase 1 goals:
++ * - Observe the real protobuf/ASCII strings for YouTube search result cards.
++ * - Extract video id, duration-like tokens and the auto-dub radar marker.
++ * - Optionally hide obvious Shorts and results shorter than the configured duration.
++ * - Optionally require the auto-dub marker.
++ *
++ * All destructive filters default OFF. The patch is safe to install as a diagnostic build.
++ */
++@SuppressWarnings("unused")
++public final class HunterFilter extends Filter {
++    private static final String TAG = "HUNTER";
++
++    private final StringFilterGroup searchCards = new StringFilterGroup(
++            Settings.HUNTER_ENABLED,
++            "search_video_with_context.e",
++            "video_lockup_with_attachment.e",
++            "compact_video.e",
++            "inline_shorts",
++            "shorts_video_cell",
++            "shorts_pivot_item.e",
++            "shorts_lockup_cell.e",
++            "video_card.e"
++    );
++
++    private static final Pattern DURATION_TOKEN = Pattern.compile(
++            "(?<![0-9])(?:(\\d{1,2}):)?([0-5]?\\d):([0-5]\\d)(?![0-9])"
++    );
++
++    private static final String[] SHORT_MARKERS = {
++            "inline_shorts",
++            "shorts_video_cell",
++            "shorts_pivot_item.e",
++            "shorts_lockup_cell.e",
++            "shorts-lockup-image",
++            "/shorts/"
++    };
++
++    private static final String[] AUTO_DUB_MARKERS = {
++            "yt_outline_person_radar",
++            "yt_outline_experimental_person_waves"
++    };
++
++    public HunterFilter() {
++        addPathCallbacks(searchCards);
++    }
++
++    @Override
++    public boolean isFiltered(ContextInterface contextInterface,
++                              String identifier,
++                              String accessibility,
++                              String path,
++                              byte[] buffer,
++                              BufferAsciiStrings asciiStrings,
++                              StringFilterGroup matchedGroup,
++                              FilterContentType contentType,
++                              int contentIndex) {
++        if (!Settings.HUNTER_ENABLED.get()) return false;
++        if (!NavigationBar.isSearchBarActive()) return false;
++        if (contentIndex != 0) return false;
++
++        final String ascii = asciiStrings.getStrings();
++        final String decoded = new String(buffer, StandardCharsets.UTF_8);
++        final String videoId = BufferPhraseFilter.extractVideoIdFromBuffer(buffer);
++        final boolean isShort = containsAny(path, SHORT_MARKERS) || containsAny(ascii, SHORT_MARKERS);
++        final boolean autoDub = containsAny(ascii, AUTO_DUB_MARKERS) || containsAny(decoded, AUTO_DUB_MARKERS);
++        final int durationSeconds = extractLongestDurationSeconds(ascii + "❙" + accessibility);
++        final int minDurationSeconds = parseMinDurationSeconds();
++
++        if (Settings.HUNTER_DEBUG_LOGS.get()) {
++            Logger.printDebug(() -> TAG
++                    + " search-card id=" + (videoId == null ? "?" : videoId)
++                    + " duration=" + durationSeconds
++                    + "s autoDubMarker=" + autoDub
++                    + " short=" + isShort
++                    + " path=" + path
++                    + " accessibility=" + truncate(accessibility, 220)
++                    + " ascii=" + truncate(ascii, 900));
++        }
++
++        if (Settings.HUNTER_HIDE_SHORTS.get() && isShort) {
++            Logger.printDebug(() -> TAG + " hide short id=" + videoId);
++            return true;
++        }
++
++        // Fail-open while duration extraction is experimental. Unknown duration is logged but not hidden.
++        if (minDurationSeconds > 0 && durationSeconds >= 0 && durationSeconds < minDurationSeconds) {
++            Logger.printDebug(() -> TAG + " hide duration id=" + videoId + " duration=" + durationSeconds);
++            return true;
++        }
++
++        // Experimental auto-dub requirement uses the Morphe radar marker already observed in badges.
++        // Unknown/absent marker is filtered only when the user explicitly enables this option.
++        if (Settings.HUNTER_REQUIRE_AUTO_DUB.get() && !autoDub) {
++            Logger.printDebug(() -> TAG + " hide no-auto-dub id=" + videoId);
++            return true;
++        }
++
++        return false;
++    }
++
++    private static int parseMinDurationSeconds() {
++        try {
++            String raw = Settings.HUNTER_MIN_DURATION_MINUTES.get().trim();
++            if (raw.isEmpty()) return 0;
++            int minutes = Integer.parseInt(raw);
++            if (minutes <= 0) return 0;
++            return Math.min(minutes, 24 * 60) * 60;
++        } catch (Exception ignored) {
++            return 0;
++        }
++    }
++
++    private static int extractLongestDurationSeconds(String text) {
++        Matcher matcher = DURATION_TOKEN.matcher(text);
++        int longest = -1;
++        while (matcher.find()) {
++            try {
++                int hours = matcher.group(1) == null ? 0 : Integer.parseInt(matcher.group(1));
++                int minutes = Integer.parseInt(matcher.group(2));
++                int seconds = Integer.parseInt(matcher.group(3));
++                int total = hours * 3600 + minutes * 60 + seconds;
++                if (total > longest) longest = total;
++            } catch (NumberFormatException ignored) {
++                // Keep scanning.
++            }
++        }
++        return longest;
++    }
++
++    private static boolean containsAny(String text, String[] markers) {
++        if (text == null || text.isEmpty()) return false;
++        for (String marker : markers) {
++            if (text.contains(marker)) return true;
++        }
++        return false;
++    }
++
++    private static String truncate(String value, int max) {
++        if (value == null) return "";
++        String normalized = value.replace('\n', ' ');
++        return normalized.length() <= max ? normalized : normalized.substring(0, max) + "…";
++    }
++}
+diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/Settings.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/Settings.java
+index 7a56956..2542733 100644
+--- a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/Settings.java
++++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/Settings.java
+@@ -200,6 +200,13 @@ public class Settings extends SharedYouTubeSettings {
+     public static final BooleanSetting HIDE_FILTER_BAR_IN_RELATED_VIDEOS = new BooleanSetting("morphe_hide_filter_bar_in_related_videos", FALSE, true);
+     public static final BooleanSetting HIDE_FILTER_BAR_IN_SEARCH = new BooleanSetting("morphe_hide_filter_bar_in_search", FALSE, true);
+ 
++    // YouTube Hunter (experimental)
++    public static final BooleanSetting HUNTER_ENABLED = new BooleanSetting("morphe_hunter_enabled", FALSE);
++    public static final BooleanSetting HUNTER_DEBUG_LOGS = new BooleanSetting("morphe_hunter_debug_logs", TRUE, parent(HUNTER_ENABLED));
++    public static final BooleanSetting HUNTER_HIDE_SHORTS = new BooleanSetting("morphe_hunter_hide_shorts", FALSE, parent(HUNTER_ENABLED));
++    public static final BooleanSetting HUNTER_REQUIRE_AUTO_DUB = new BooleanSetting("morphe_hunter_require_auto_dub", FALSE, parent(HUNTER_ENABLED));
++    public static final StringSetting HUNTER_MIN_DURATION_MINUTES = new StringSetting("morphe_hunter_min_duration_minutes", "0", parent(HUNTER_ENABLED));
++
+     // Keyword filter
+     public static final BooleanSetting HIDE_KEYWORD_CONTENT_COMMENTS = new BooleanSetting("morphe_hide_keyword_content_comments", FALSE);
+     public static final BooleanSetting HIDE_KEYWORD_CONTENT_HOME = new BooleanSetting("morphe_hide_keyword_content_home", FALSE);
+diff --git a/patches/src/main/kotlin/app/morphe/patches/youtube/hunter/YouTubeHunterPatch.kt b/patches/src/main/kotlin/app/morphe/patches/youtube/hunter/YouTubeHunterPatch.kt
+new file mode 100644
+index 0000000..3a63c3c
+--- /dev/null
++++ b/patches/src/main/kotlin/app/morphe/patches/youtube/hunter/YouTubeHunterPatch.kt
+@@ -0,0 +1,56 @@
++/*
++ * YouTube Hunter experimental patch for Morphe.
++ */
++package app.morphe.patches.youtube.hunter
++
++import app.morphe.patcher.patch.bytecodePatch
++import app.morphe.patches.shared.misc.litho.filter.addLithoFilter
++import app.morphe.patches.shared.misc.settings.preference.InputType
++import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference
++import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference.Sorting
++import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
++import app.morphe.patches.shared.misc.settings.preference.TextPreference
++import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
++import app.morphe.patches.youtube.misc.litho.filter.lithoFilterPatch
++import app.morphe.patches.youtube.misc.navigation.navigationBarHookPatch
++import app.morphe.patches.youtube.misc.settings.PreferenceScreen
++import app.morphe.patches.youtube.misc.settings.settingsPatch
++import app.morphe.patches.youtube.shared.Constants.COMPATIBILITY_YOUTUBE
++
++private const val HUNTER_FILTER =
++    "Lapp/morphe/extension/youtube/patches/components/HunterFilter;"
++
++val youtubeHunterPatch = bytecodePatch(
++    name = "YouTube Hunter (Experimental)",
++    description = "Adds experimental search-result diagnostics and Hunter filters for duration, Shorts and auto-dub."
++) {
++    dependsOn(
++        sharedExtensionPatch,
++        settingsPatch,
++        lithoFilterPatch,
++        navigationBarHookPatch
++    )
++
++    compatibleWith(COMPATIBILITY_YOUTUBE)
++
++    execute {
++        PreferenceScreen.GENERAL.addPreferences(
++            PreferenceScreenPreference(
++                key = "morphe_hunter_screen",
++                sorting = Sorting.UNSORTED,
++                preferences = setOf(
++                    SwitchPreference("morphe_hunter_enabled", summary = true),
++                    SwitchPreference("morphe_hunter_debug_logs", summary = true),
++                    TextPreference(
++                        "morphe_hunter_min_duration_minutes",
++                        inputType = InputType.NUMBER
++                    ),
++                    SwitchPreference("morphe_hunter_hide_shorts", summary = true),
++                    SwitchPreference("morphe_hunter_require_auto_dub", summary = true)
++                )
++            )
++        )
++
++        addLithoFilter(HUNTER_FILTER)
++    }
++}
+diff --git a/patches/src/main/resources/addresources/values-es-rES/youtube/strings.xml b/patches/src/main/resources/addresources/values-es-rES/youtube/strings.xml
+index d890d5b..d579002 100644
+--- a/patches/src/main/resources/addresources/values-es-rES/youtube/strings.xml
++++ b/patches/src/main/resources/addresources/values-es-rES/youtube/strings.xml
+@@ -1281,4 +1281,19 @@ La reproducción de vídeo con AV1 se puede atascar o perder fotogramas."</strin
+   <string name="morphe_restore_old_video_action_bar_summary">"Corrige que no se muestren los 'No me gusta' y que no se puedan ocultar los botones de acción de vídeo
+ 
+ Limitaciones: Vuelve al antiguo estilo de superposición de 'Más vídeos'"</string>
++
++    <!-- youtube.hunter.youtubeHunterPatch -->
++    <string name="morphe_hunter_screen_title">YouTube Hunter (Experimental)</string>
++    <string name="morphe_hunter_screen_summary">Filtros locales experimentales para los resultados de búsqueda de YouTube</string>
++    <string name="morphe_hunter_enabled_title">Activar YouTube Hunter</string>
++    <string name="morphe_hunter_enabled_summary">Hunter actúa únicamente sobre las tarjetas de resultados de búsqueda</string>
++    <string name="morphe_hunter_debug_logs_title">Registros de diagnóstico Hunter</string>
++    <string name="morphe_hunter_debug_logs_summary">Registra ID, posibles duraciones, señales de Shorts y marcadores de doblaje automático</string>
++    <string name="morphe_hunter_min_duration_minutes_title">Duración mínima (minutos)</string>
++    <string name="morphe_hunter_min_duration_minutes_summary">0 desactiva el filtro. Las duraciones desconocidas se conservan durante la fase experimental</string>
++    <string name="morphe_hunter_hide_shorts_title">Ocultar Shorts en búsqueda</string>
++    <string name="morphe_hunter_hide_shorts_summary">Oculta tarjetas que contienen marcadores conocidos de Shorts</string>
++    <string name="morphe_hunter_require_auto_dub_title">Exigir marcador de doblaje automático</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental: oculta resultados que no exponen el marcador radar de doblaje automático de Morphe</string>
++
+ </resources>
+diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml b/patches/src/main/resources/addresources/values/youtube/strings.xml
+index d26795f..b9843b3 100644
+--- a/patches/src/main/resources/addresources/values/youtube/strings.xml
++++ b/patches/src/main/resources/addresources/values/youtube/strings.xml
+@@ -1412,4 +1412,19 @@ Video playback with AV1 may stutter or drop frames."</string>
+     <string name="morphe_restore_old_video_action_bar_summary">"Fixes dislikes not shown and video action buttons cannot be hidden
+ 
+ Limitation: Reverts to old style \'More videos\' overlay"</string>
++
++    <!-- youtube.hunter.youtubeHunterPatch -->
++    <string name="morphe_hunter_screen_title">YouTube Hunter (Experimental)</string>
++    <string name="morphe_hunter_screen_summary">Experimental local filters for YouTube search results</string>
++    <string name="morphe_hunter_enabled_title">Enable YouTube Hunter</string>
++    <string name="morphe_hunter_enabled_summary">Runs Hunter only on YouTube search result cards</string>
++    <string name="morphe_hunter_debug_logs_title">Hunter diagnostic logs</string>
++    <string name="morphe_hunter_debug_logs_summary">Logs video id, duration candidates, Shorts signals and auto-dub markers for search cards</string>
++    <string name="morphe_hunter_min_duration_minutes_title">Minimum duration (minutes)</string>
++    <string name="morphe_hunter_min_duration_minutes_summary">0 disables the duration filter. Unknown durations are kept during the experimental phase</string>
++    <string name="morphe_hunter_hide_shorts_title">Hide Shorts in search</string>
++    <string name="morphe_hunter_hide_shorts_summary">Hides search cards that contain known Shorts markers</string>
++    <string name="morphe_hunter_require_auto_dub_title">Require auto-dub marker</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental: hides search results that do not expose Morphe's auto-dub radar marker</string>
++
+ </resources>
