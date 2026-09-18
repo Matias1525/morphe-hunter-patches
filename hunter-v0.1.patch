@@ -4677,7 +4677,7 @@ diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/setti
 index 6c36913..bb20000 100644
 --- a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java
-@@ -1,107 +1,262 @@
+@@ -1,103 +1,263 @@
 -/*
 - * Copyright 2026 Morphe.
 - * https://github.com/MorpheApp/morphe-patches
@@ -4884,11 +4884,11 @@ index 6c36913..bb20000 100644
 +    }
 +
 +    private ListView getRootPreferenceListView() {
-        View rootView = getView();
-        return rootView == null ? null : rootView.findViewById(android.R.id.list);
-    }
-
-    private void openPreferenceScreenPath(String targetKey) {
++        View rootView = getView();
++        return rootView == null ? null : rootView.findViewById(android.R.id.list);
++    }
++
++    private void openPreferenceScreenPath(String targetKey) {
 +        try {
 +            Preference target = findPreference(targetKey);
 +            PreferenceScreen root = getPreferenceScreen();
