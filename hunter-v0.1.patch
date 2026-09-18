@@ -54,6 +54,7 @@ index 0000000..1f47716
 +package app.morphe.extension.youtube.patches.components;
 +
 +import java.nio.charset.StandardCharsets;
++import java.util.concurrent.ConcurrentHashMap;
 +import java.util.regex.Matcher;
 +import java.util.regex.Pattern;
 +
@@ -73,7 +74,7 @@ index 0000000..1f47716
 + * - Observe the real protobuf/ASCII strings for YouTube search result cards.
 + * - Extract video id, duration-like tokens and the auto-dub radar marker.
 + * - Optionally hide obvious Shorts and results shorter than the configured duration.
-+ * - Optionally require the auto-dub marker.
++ * - Observe Morphe's auto-dub badge and associate it to search cards by video id.
 + *
 + * All destructive filters default OFF. The patch is safe to install as a diagnostic build.
 + */
@@ -92,6 +93,16 @@ index 0000000..1f47716
 +            "shorts_lockup_cell.e",
 +            "video_card.e"
 +    );
++
++    // Morphe exposes the auto-dub signal on the child badge component, not reliably
++    // on the parent search-card buffer. Observe it separately and associate by video id.
++    private final StringFilterGroup autoDubBadges = new StringFilterGroup(
++            Settings.HUNTER_ENABLED,
++            "|badge.e"
++    );
++
++    private static final ConcurrentHashMap<String, Boolean> AUTO_DUB_BY_VIDEO_ID =
++            new ConcurrentHashMap<>();
 +
 +    private static final Pattern DURATION_TOKEN = Pattern.compile(
 +            "(?<![0-9])(?:(\\d{1,2}):)?([0-5]?\\d):([0-5]\\d)(?![0-9])"
@@ -112,7 +123,7 @@ index 0000000..1f47716
 +    };
 +
 +    public HunterFilter() {
-+        addPathCallbacks(searchCards);
++        addPathCallbacks(searchCards, autoDubBadges);
 +    }
 +
 +    @Override
@@ -127,13 +138,42 @@ index 0000000..1f47716
 +                              int contentIndex) {
 +        if (!Settings.HUNTER_ENABLED.get()) return false;
 +        if (!NavigationBar.isSearchBarActive()) return false;
-+        if (contentIndex != 0) return false;
 +
 +        final String ascii = asciiStrings.getStrings();
 +        final String decoded = new String(buffer, StandardCharsets.UTF_8);
 +        final String videoId = BufferPhraseFilter.extractVideoIdFromBuffer(buffer);
++
++        if (matchedGroup == autoDubBadges) {
++            final boolean radar = containsAny(ascii, AUTO_DUB_MARKERS)
++                    || containsAny(decoded, AUTO_DUB_MARKERS);
++
++            if (radar && videoId != null) {
++                AUTO_DUB_BY_VIDEO_ID.put(videoId, true);
++            }
++
++            if (Settings.HUNTER_DEBUG_LOGS.get()) {
++                Logger.printDebug(() -> TAG
++                        + " badge id=" + (videoId == null ? "?" : videoId)
++                        + " radar=" + radar
++                        + " path=" + path
++                        + " accessibility=" + truncate(accessibility, 220)
++                        + " ascii=" + truncate(ascii, 900));
++            }
++
++            // Hunter never hides the badge itself. It is observation-only.
++            return false;
++        }
++
++        if (contentIndex != 0) return false;
++
++        final boolean autoDubInCard = containsAny(ascii, AUTO_DUB_MARKERS)
++                || containsAny(decoded, AUTO_DUB_MARKERS);
++        if (autoDubInCard && videoId != null) {
++            AUTO_DUB_BY_VIDEO_ID.put(videoId, true);
++        }
++        final boolean autoDub = videoId != null
++                && Boolean.TRUE.equals(AUTO_DUB_BY_VIDEO_ID.get(videoId));
 +        final boolean isShort = containsAny(path, SHORT_MARKERS) || containsAny(ascii, SHORT_MARKERS);
-+        final boolean autoDub = containsAny(ascii, AUTO_DUB_MARKERS) || containsAny(decoded, AUTO_DUB_MARKERS);
 +        final int durationSeconds = extractLongestDurationSeconds(ascii + "❙" + accessibility);
 +        final int minDurationSeconds = parseMinDurationSeconds();
 +
@@ -141,7 +181,7 @@ index 0000000..1f47716
 +            Logger.printDebug(() -> TAG
 +                    + " search-card id=" + (videoId == null ? "?" : videoId)
 +                    + " duration=" + durationSeconds
-+                    + "s autoDubMarker=" + autoDub
++                    + "s autoDubAssociated=" + autoDub
 +                    + " short=" + isShort
 +                    + " path=" + path
 +                    + " accessibility=" + truncate(accessibility, 220)
@@ -159,11 +199,19 @@ index 0000000..1f47716
 +            return true;
 +        }
 +
-+        // Experimental auto-dub requirement uses the Morphe radar marker already observed in badges.
-+        // Unknown/absent marker is filtered only when the user explicitly enables this option.
-+        if (Settings.HUNTER_REQUIRE_AUTO_DUB.get() && !autoDub) {
-+            Logger.printDebug(() -> TAG + " hide no-auto-dub id=" + videoId);
-+            return true;
++        // Auto-dub lives on a child |badge.e component. Only hide when we have a stable
++        // video-id association. Unknown association is fail-open in v0.1.3 so Hunter
++        // cannot wipe the entire search page while we validate badge/card correlation.
++        if (Settings.HUNTER_REQUIRE_AUTO_DUB.get()) {
++            if (videoId == null) {
++                Logger.printDebug(() -> TAG + " auto-dub unknown: card has no video id; keeping");
++                return false;
++            }
++            if (autoDub) {
++                Logger.printDebug(() -> TAG + " keep verified auto-dub id=" + videoId);
++                return false;
++            }
++            Logger.printDebug(() -> TAG + " auto-dub not yet associated id=" + videoId + "; keeping in diagnostic v0.1.3");
 +        }
 +
 +        return false;
@@ -313,7 +361,7 @@ index d890d5b..d579002 100644
 +    <string name="morphe_hunter_hide_shorts_title">Ocultar Shorts en búsqueda</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Oculta tarjetas que contienen marcadores conocidos de Shorts</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Exigir marcador de doblaje automático</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental: oculta resultados que no exponen el marcador radar de doblaje automático de Morphe</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.3: asocia el badge de doblaje automático con el video. Las asociaciones desconocidas se conservan para evitar falsos negativos</string>
 +
  </resources>
 diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml b/patches/src/main/resources/addresources/values/youtube/strings.xml
@@ -337,6 +385,6 @@ index d26795f..b9843b3 100644
 +    <string name="morphe_hunter_hide_shorts_title">Hide Shorts in search</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Hides search cards that contain known Shorts markers</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Require auto-dub marker</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental: hides search results that do not expose Morphe's auto-dub radar marker</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.3: associates the auto-dub badge with its video. Unknown associations are kept to avoid false negatives</string>
 +
  </resources>
