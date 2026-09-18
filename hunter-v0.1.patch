@@ -46,7 +46,7 @@ new file mode 100644
 index 0000000..1f47716
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,532 @@
 +/*
 + * YouTube Hunter experimental filter for Morphe.
 + * Diagnostic-first implementation: search results only.
@@ -72,12 +72,14 @@ index 0000000..1f47716
 +/**
 + * Experimental YouTube Hunter filter.
 + *
-+ * v0.1.6 goals:
++ * v0.1.7 goals:
 + * - Keep duration and Shorts filtering local and realtime.
 + * - Observe Morphe's |badge.e auto-dub signal.
 + * - Correlate child auto-dub badges to recently rendered search cards using the
 + *   actual Litho component path, preferring exact parent-path containment.
-+ * - Capture a deep Hunter/YouTube Litho trace that can be exported as a .txt file.
++ * - Capture deep Litho traces from Search, Home/feed and Player surfaces.
++ * - Keep filtering limited to Search while diagnostics observe all relevant surfaces.
++ * - Treat only a real badge component as auto-dub evidence; never generic card-buffer icons.
 + * - Keep audio filtering fail-open until path correlation is proven on-device.
 + */
 +@SuppressWarnings("unused")
@@ -154,16 +156,23 @@ index 0000000..1f47716
 +                              FilterContentType contentType,
 +                              int contentIndex) {
 +        if (!Settings.HUNTER_ENABLED.get()) return false;
-+        if (!NavigationBar.isSearchBarActive()) return false;
 +
 +        final String ascii = asciiStrings.getStrings();
 +        final String decoded = new String(buffer, StandardCharsets.UTF_8);
 +        final String directVideoId = BufferPhraseFilter.extractVideoIdFromBuffer(buffer);
++        final boolean searchSurface = NavigationBar.isSearchBarActive();
++        final String surface = searchSurface
++                ? "SEARCH"
++                : detectNonSearchSurface(path, ascii, accessibility);
 +
++        // Diagnostics intentionally run BEFORE the Search-only filtering gate.
++        // This is required because YouTube renders the visible auto-dub badge in Home/feed,
++        // while Search does not necessarily render that label at all.
 +        if (Settings.HUNTER_DEBUG_LOGS.get()) {
 +            HunterTraceLog.append(
 +                    "LITHO_MATCH",
-+                    "group=" + groupName(matchedGroup)
++                    "surface=" + surface
++                            + "\ngroup=" + groupName(matchedGroup)
 +                            + "\ncontentType=" + contentType
 +                            + "\ncontentIndex=" + contentIndex
 +                            + "\nidentifier=" + identifier
@@ -174,14 +183,17 @@ index 0000000..1f47716
 +            );
 +        }
 +
++        if (matchedGroup == autoDubBadges) {
++            observeAutoDubBadge(surface, path, accessibility, ascii, decoded, directVideoId);
++            return false;
++        }
++
 +        if (matchedGroup == traceComponents) {
 +            return false;
 +        }
 +
-+        if (matchedGroup == autoDubBadges) {
-+            observeAutoDubBadge(path, accessibility, ascii, decoded, directVideoId);
-+            return false;
-+        }
++        // Hunter filtering remains Search-only. Home/feed and Player are observation-only.
++        if (!searchSurface) return false;
 +
 +        if (contentIndex != 0) return false;
 +
@@ -189,12 +201,8 @@ index 0000000..1f47716
 +            rememberSearchCard(directVideoId, path);
 +        }
 +
-+        final boolean autoDubInCard = containsAny(ascii, AUTO_DUB_MARKERS)
-+                || containsAny(decoded, AUTO_DUB_MARKERS);
-+        if (autoDubInCard && directVideoId != null) {
-+            markAutoDub(directVideoId, "card-buffer");
-+        }
-+
++        // Do NOT infer auto-dub from generic icon names inside a card buffer.
++        // Those buffers contain shared YouTube resource catalogs and caused false positives.
 +        final boolean autoDub = directVideoId != null
 +                && Boolean.TRUE.equals(AUTO_DUB_BY_VIDEO_ID.get(directVideoId));
 +        final boolean isShort = containsAny(path, SHORT_MARKERS)
@@ -246,7 +254,7 @@ index 0000000..1f47716
 +
 +            Logger.printDebug(() -> TAG
 +                    + " auto-dub not associated yet id=" + directVideoId
-+                    + "; keeping in diagnostic v0.1.6");
++                    + "; keeping in diagnostic v0.1.7");
 +        }
 +
 +        traceDecision(directVideoId, "KEEP", "no_destructive_match", autoDub, durationSeconds, path);
@@ -275,7 +283,8 @@ index 0000000..1f47716
 +        }
 +    }
 +
-+    private static void observeAutoDubBadge(String path,
++    private static void observeAutoDubBadge(String surface,
++                                            String path,
 +                                            String accessibility,
 +                                            String ascii,
 +                                            String decoded,
@@ -291,7 +300,8 @@ index 0000000..1f47716
 +        if (Settings.HUNTER_DEBUG_LOGS.get()) {
 +            HunterTraceLog.append(
 +                    "AUTO_DUB_BADGE",
-+                    "directVideoId=" + (directVideoId == null ? "?" : directVideoId)
++                    "surface=" + surface
++                            + "\ndirectVideoId=" + (directVideoId == null ? "?" : directVideoId)
 +                            + "\nbadgePath=" + path
 +                            + "\naccessibility=" + traceText(accessibility, 700)
 +                            + "\nascii=" + traceText(ascii, 2200)
@@ -308,7 +318,8 @@ index 0000000..1f47716
 +                    int candidateScore = pathMatchScore(candidate.path, path);
 +                    HunterTraceLog.append(
 +                            "CORRELATION_CANDIDATE",
-+                            "videoId=" + candidate.videoId
++                            "surface=" + surface
++                                    + "\nvideoId=" + candidate.videoId
 +                                    + "\nscore=" + candidateScore
 +                                    + "\ncardPath=" + candidate.path
 +                                    + "\nbadgePath=" + path
@@ -343,7 +354,8 @@ index 0000000..1f47716
 +
 +            HunterTraceLog.append(
 +                    finalVideoId == null ? "CORRELATION_FAIL" : "CORRELATION_SELECTED",
-+                    "videoId=" + (finalVideoId == null ? "?" : finalVideoId)
++                    "surface=" + surface
++                            + "\nvideoId=" + (finalVideoId == null ? "?" : finalVideoId)
 +                            + "\nsource=" + finalAssociationSource
 +                            + "\ncardPath=" + (finalMatchedCard == null ? "?" : finalMatchedCard.path)
 +                            + "\nbadgePath=" + path
@@ -494,6 +506,35 @@ index 0000000..1f47716
 +                : normalized.substring(0, max) + "…";
 +    }
 +
++    private static String detectNonSearchSurface(String path,
++                                                 String ascii,
++                                                 String accessibility) {
++        String combined = (path == null ? "" : path)
++                + "❙"
++                + (ascii == null ? "" : ascii)
++                + "❙"
++                + (accessibility == null ? "" : accessibility);
++
++        if (combined.contains("watch")
++                || combined.contains("player")
++                || combined.contains("video_metadata.eml")
++                || combined.contains("audio_track")
++                || combined.contains("audio_track_sheet_content")) {
++            return "PLAYER";
++        }
++
++        if (combined.contains("browse")
++                || combined.contains("rich_grid")
++                || combined.contains("home")
++                || combined.contains("feed")
++                || combined.contains("video_card")
++                || combined.contains("video_lockup")) {
++            return "HOME_OR_FEED";
++        }
++
++        return "OTHER";
++    }
++
 +    private static String groupName(StringFilterGroup group) {
 +        if (group == null) return "null";
 +        return group.filters.toString();
@@ -614,7 +655,7 @@ index 0000000..1111111
 +
 +    public static String exportText() {
 +        StringBuilder out = new StringBuilder();
-+        out.append("YouTube Hunter deep trace v0.1.6\n");
++        out.append("YouTube Hunter deep trace v0.1.7\n");
 +        out.append("Entries are chronological. Focus on LITHO_MATCH, AUTO_DUB_BADGE, ")
 +                .append("CORRELATION_CANDIDATE, CORRELATION_SELECTED/FAIL and FILTER_DECISION.\n");
 +        out.append("============================================================\n");
@@ -834,7 +875,7 @@ index d890d5b..d579002 100644
 +    <string name="morphe_hunter_enabled_title">Activar YouTube Hunter</string>
 +    <string name="morphe_hunter_enabled_summary">Hunter actúa únicamente sobre las tarjetas de resultados de búsqueda</string>
 +    <string name="morphe_hunter_debug_logs_title">Registros de diagnóstico Hunter</string>
-+    <string name="morphe_hunter_debug_logs_summary">Registro profundo: captura la secuencia Litho relevante, IDs, rutas, metadata, badges, señales de audio y decisiones de Hunter</string>
++    <string name="morphe_hunter_debug_logs_summary">Registro profundo: captura Search, Home/feed y Player, incluyendo IDs, rutas, metadata, badges, señales de audio y decisiones de Hunter</string>
 +    <string name="morphe_hunter_export_trace_title">Exportar log Hunter (.txt)</string>
 +    <string name="morphe_hunter_export_trace_summary">Guarda el registro profundo de esta prueba en un archivo TXT para analizar la secuencia exacta</string>
 +    <string name="morphe_hunter_clear_trace_title">Limpiar log Hunter</string>
@@ -844,7 +885,7 @@ index d890d5b..d579002 100644
 +    <string name="morphe_hunter_hide_shorts_title">Ocultar Shorts en búsqueda</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Oculta tarjetas que contienen marcadores conocidos de Shorts</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Exigir marcador de doblaje automático</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.6: registra la secuencia real de Litho y correlaciona badges con tarjetas. Las asociaciones desconocidas se conservan durante el diagnóstico</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.7: observa Search, Home/feed y Player. Solo un badge real cuenta como doblaje automático; el filtrado sigue limitado a búsquedas</string>
 +
  </resources>
 diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml b/patches/src/main/resources/addresources/values/youtube/strings.xml
@@ -862,7 +903,7 @@ index d26795f..b9843b3 100644
 +    <string name="morphe_hunter_enabled_title">Enable YouTube Hunter</string>
 +    <string name="morphe_hunter_enabled_summary">Runs Hunter only on YouTube search result cards</string>
 +    <string name="morphe_hunter_debug_logs_title">Hunter diagnostic logs</string>
-+    <string name="morphe_hunter_debug_logs_summary">Deep trace: records relevant Litho sequence, IDs, paths, metadata, badges, audio signals and Hunter decisions</string>
++    <string name="morphe_hunter_debug_logs_summary">Deep trace: records Search, Home/feed and Player, including IDs, paths, metadata, badges, audio signals and Hunter decisions</string>
 +    <string name="morphe_hunter_export_trace_title">Export Hunter log (.txt)</string>
 +    <string name="morphe_hunter_export_trace_summary">Save the deep trace from this test as a TXT file for exact sequence analysis</string>
 +    <string name="morphe_hunter_clear_trace_title">Clear Hunter log</string>
@@ -872,6 +913,6 @@ index d26795f..b9843b3 100644
 +    <string name="morphe_hunter_hide_shorts_title">Hide Shorts in search</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Hides search cards that contain known Shorts markers</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Require auto-dub marker</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.6: records the real Litho sequence and correlates badges to cards. Unknown associations remain visible during diagnostics</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.7: observes Search, Home/feed and Player. Only a real badge counts as auto-dub; filtering remains limited to Search</string>
 +
  </resources>
