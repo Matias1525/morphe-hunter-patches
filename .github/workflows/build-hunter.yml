@@ -121,7 +121,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S')"
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/patches-hunter-v${VERSION}.mpp"
 
           cat > patches-bundle.json <<EOF
