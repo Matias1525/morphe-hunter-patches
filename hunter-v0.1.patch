@@ -45,14 +45,14 @@ diff --git a/extensions/shared-youtube/library/src/main/java/app/morphe/extensio
 index c8178de..c8178df 100644
 --- a/extensions/shared-youtube/library/src/main/java/app/morphe/extension/shared/patches/ForceOriginalAudioPatch.java
 +++ b/extensions/shared-youtube/library/src/main/java/app/morphe/extension/shared/patches/ForceOriginalAudioPatch.java
-@@ -31,6 +31,6 @@ public class ForceOriginalAudioPatch {
+@@ -31,5 +31,6 @@ public class ForceOriginalAudioPatch {
          // Methods are added during patching.
          String patch_getDisplayName();
          String patch_getId();
 +        boolean patch_getIsAutoDubbed();
          boolean patch_getIsDefault();
      }
-@@ -72,6 +73,8 @@ public class ForceOriginalAudioPatch {
+@@ -72,5 +73,8 @@ public class ForceOriginalAudioPatch {
      @Nullable
      public static String getDefaultAudioTrackId(AudioTrackInterface[] audioTracks) {
 +        // Hunter diagnostic hook. Runs regardless of the Force original audio setting.
@@ -1086,7 +1086,7 @@ diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml 
 index d26795f..b9843b3 100644
 --- a/patches/src/main/resources/addresources/values/youtube/strings.xml
 +++ b/patches/src/main/resources/addresources/values/youtube/strings.xml
-@@ -1412,4 +1412,23 @@ Video playback with AV1 may stutter or drop frames."</string>
+@@ -1412,5 +1412,24 @@ Video playback with AV1 may stutter or drop frames."</string>
      <string name="morphe_restore_old_video_action_bar_summary">"Fixes dislikes not shown and video action buttons cannot be hidden
  
  Limitation: Reverts to old style \'More videos\' overlay"</string>
