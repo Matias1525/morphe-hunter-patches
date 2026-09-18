@@ -82,7 +82,7 @@ index 0000000..4444444
 +/**
 + * Diagnostic bridge used by YouTube Hunter to inspect and correlate the real player audio-track model.
 + *
-+ * v0.2.0 binds audioTracks[] to YouTube's authoritative current-playing video ID supplied by
++ * v0.2.1 binds audioTracks[] to YouTube's authoritative current-playing video ID supplied by
 + * VideoInformation.setVideoId(). Player-response IDs are recorded as secondary diagnostics only,
 + * because YouTube can prefetch a different response while the current player remains unchanged.
 + */
@@ -429,10 +429,10 @@ index 0000000..4444444
 +
 diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
 new file mode 100644
-index 0000000..1f47716
+index 0000000..1f47717
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,595 @@
 +/*
 + * YouTube Hunter experimental filter for Morphe.
 + * Diagnostic-first implementation: search results only.
@@ -459,7 +459,7 @@ index 0000000..1f47716
 +/**
 + * Experimental YouTube Hunter filter.
 + *
-+ * v0.2.0 goals:
++ * v0.2.1 goals:
 + * - Keep duration and Shorts filtering local and realtime.
 + * - Observe Morphe's |badge.e auto-dub signal.
 + * - Correlate child auto-dub badges to recently rendered search cards using the
@@ -467,7 +467,8 @@ index 0000000..1f47716
 + * - Capture deep Litho traces from Search, Home/feed and Player surfaces.
 + * - Keep filtering limited to Search while diagnostics observe all relevant surfaces.
 + * - Treat only a real badge component as auto-dub evidence; never generic card-buffer icons.
-+ * - Keep audio filtering fail-open until path correlation is proven on-device.
++ * - When the explicit auto-dub filter is enabled, use only verified Player audio cache evidence.
++ * - Unknown/unverified candidate videos fail closed; badge association stays diagnostic only.
 + */
 +@SuppressWarnings("unused")
 +public final class HunterFilter extends Filter {
@@ -592,10 +593,14 @@ index 0000000..1f47716
 +            rememberSearchCard(directVideoId, path);
 +        }
 +
-+        // Do NOT infer auto-dub from generic icon names inside a card buffer.
-+        // Those buffers contain shared YouTube resource catalogs and caused false positives.
-+        final boolean autoDub = directVideoId != null
++        // Badge association remains diagnostic. Explicit audio filtering trusts only
++        // the verified Player audio model cached by HunterAudioTrackBridge.
++        final boolean autoDubBadgeAssociated = directVideoId != null
 +                && Boolean.TRUE.equals(AUTO_DUB_BY_VIDEO_ID.get(directVideoId));
++        final String verifiedAudioClassification = directVideoId == null
++                ? null
++                : HunterAudioTrackBridge.getVerifiedClassification(directVideoId);
++        final boolean verifiedAutoDubEs = "AUTO_DUB_ES".equals(verifiedAudioClassification);
 +        final boolean isShort = containsAny(path, SHORT_MARKERS)
 +                || containsAny(ascii, SHORT_MARKERS);
 +        final int durationSeconds = extractLongestDurationSeconds(
@@ -607,7 +612,8 @@ index 0000000..1f47716
 +            Logger.printDebug(() -> TAG
 +                    + " search-card id=" + (directVideoId == null ? "?" : directVideoId)
 +                    + " duration=" + durationSeconds
-+                    + "s autoDubAssociated=" + autoDub
++                    + "s autoDubBadgeAssociated=" + autoDubBadgeAssociated
++                    + " verifiedAudio=" + (verifiedAudioClassification == null ? "UNKNOWN" : verifiedAudioClassification)
 +                    + " short=" + isShort
 +                    + " path=" + path
 +                    + " accessibility=" + truncate(accessibility, 220)
@@ -616,7 +622,7 @@ index 0000000..1f47716
 +
 +        if (Settings.HUNTER_HIDE_SHORTS.get() && isShort) {
 +            Logger.printDebug(() -> TAG + " hide short id=" + directVideoId);
-+            traceDecision(directVideoId, "HIDE", "short", autoDub, durationSeconds, path);
++            traceDecision(directVideoId, "HIDE", "short", autoDubBadgeAssociated, durationSeconds, path);
 +            return true;
 +        }
 +
@@ -626,29 +632,61 @@ index 0000000..1f47716
 +            Logger.printDebug(() -> TAG
 +                    + " hide duration id=" + directVideoId
 +                    + " duration=" + durationSeconds);
-+            traceDecision(directVideoId, "HIDE", "duration", autoDub, durationSeconds, path);
++            traceDecision(directVideoId, "HIDE", "duration", autoDubBadgeAssociated, durationSeconds, path);
 +            return true;
 +        }
 +
 +        if (Settings.HUNTER_REQUIRE_AUTO_DUB.get()) {
 +            if (directVideoId == null) {
++                // This matched Litho component is not an identified candidate card yet.
++                // Do not destroy an anonymous child container; the identified card component
++                // will be evaluated separately once its videoId is present.
 +                Logger.printDebug(() -> TAG
-+                        + " auto-dub unknown: card has no video id; keeping");
-+                return false;
-+            }
-+            if (autoDub) {
-+                Logger.printDebug(() -> TAG
-+                        + " keep verified auto-dub id=" + directVideoId);
-+                traceDecision(directVideoId, "KEEP", "auto_dub_associated", true, durationSeconds, path);
++                        + " auto-dub component has no video id; defer to identified card");
++                traceAudioDecision(
++                        null,
++                        "DEFER",
++                        "component_without_video_id",
++                        null,
++                        durationSeconds,
++                        path
++                );
 +                return false;
 +            }
 +
++            if (verifiedAutoDubEs) {
++                Logger.printDebug(() -> TAG
++                        + " keep VERIFIED_AUTO_DUB_ES id=" + directVideoId);
++                traceAudioDecision(
++                        directVideoId,
++                        "KEEP",
++                        "verified_auto_dub_es",
++                        verifiedAudioClassification,
++                        durationSeconds,
++                        path
++                );
++                return false;
++            }
++
++            final String reason = verifiedAudioClassification == null
++                    ? "unverified_audio"
++                    : "verified_not_auto_dub_es";
 +            Logger.printDebug(() -> TAG
-+                    + " auto-dub not associated yet id=" + directVideoId
-+                    + "; keeping in diagnostic v0.2.0");
++                    + " hide auto-dub filter id=" + directVideoId
++                    + " verifiedAudio="
++                    + (verifiedAudioClassification == null ? "UNKNOWN" : verifiedAudioClassification));
++            traceAudioDecision(
++                    directVideoId,
++                    "HIDE",
++                    reason,
++                    verifiedAudioClassification,
++                    durationSeconds,
++                    path
++            );
++            return true;
 +        }
 +
-+        traceDecision(directVideoId, "KEEP", "no_destructive_match", autoDub, durationSeconds, path);
++        traceDecision(directVideoId, "KEEP", "no_destructive_match", autoDubBadgeAssociated, durationSeconds, path);
 +        return false;
 +    }
 +
@@ -957,6 +995,27 @@ index 0000000..1f47716
 +        );
 +    }
 +
++    private static void traceAudioDecision(String videoId,
++                                           String decision,
++                                           String reason,
++                                           String verifiedAudioClassification,
++                                           int durationSeconds,
++                                           String path) {
++        if (!Settings.HUNTER_DEBUG_LOGS.get()) return;
++        HunterTraceLog.append(
++                "AUDIO_FILTER_DECISION",
++                "videoId=" + (videoId == null ? "?" : videoId)
++                        + "\ndecision=" + decision
++                        + "\nreason=" + reason
++                        + "\nverifiedAudio="
++                        + (verifiedAudioClassification == null
++                            ? "UNKNOWN"
++                            : verifiedAudioClassification)
++                        + "\ndurationSeconds=" + durationSeconds
++                        + "\npath=" + path
++        );
++    }
++
 +    private static final class RecentCard {
 +        final String videoId;
 +        final String path;
@@ -969,13 +1028,12 @@ index 0000000..1f47716
 +        }
 +    }
 +}
-+
 diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java
 new file mode 100644
-index 0000000..1111111
+index 0000000..1111112
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,104 @@
 +package app.morphe.extension.youtube.patches.components;
 +
 +import java.text.SimpleDateFormat;
@@ -1047,9 +1105,9 @@ index 0000000..1111111
 +
 +    public static String exportText() {
 +        StringBuilder out = new StringBuilder();
-+        out.append("YouTube Hunter deep trace v0.2.0\n");
++        out.append("YouTube Hunter deep trace v0.2.1\n");
 +        out.append("Entries are chronological. Focus on LITHO_MATCH, AUTO_DUB_BADGE, ")
-+                .append("CORRELATION_CANDIDATE, CORRELATION_SELECTED/FAIL and FILTER_DECISION.\n");
++                .append("CORRELATION_CANDIDATE, CORRELATION_SELECTED/FAIL, FILTER_DECISION and AUDIO_FILTER_DECISION.\n");
 +        out.append("============================================================\n");
 +
 +        synchronized (ENTRIES) {
@@ -1080,7 +1138,6 @@ index 0000000..1111111
 +        }
 +    }
 +}
-+
 diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/HunterTracePreference.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/HunterTracePreference.java
 new file mode 100644
 index 0000000..2222222
@@ -4674,10 +4731,10 @@ index b865c75..aa20000 100644
 +    }
 +}
 diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java
-index 6c36913..bb20000 100644
+index 6c36913..bb20100 100644
 --- a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/YouTubePreferenceFragment.java
-@@ -1,103 +1,263 @@
+@@ -1,103 +1,280 @@
 -/*
 - * Copyright 2026 Morphe.
 - * https://github.com/MorpheApp/morphe-patches
@@ -4824,6 +4881,7 @@ index 6c36913..bb20000 100644
 +     * The main PreferenceScreen used to display the current set of preferences.
 +     */
 +    private PreferenceScreen preferenceScreen;
++    private boolean hunterDirectLaunchActive;
 +
 +    /**
 +     * Initializes the preference fragment.
@@ -4871,6 +4929,7 @@ index 6c36913..bb20000 100644
 +                Intent intent = activity.getIntent();
 +                String requestedScreen = intent.getStringExtra(HUNTER_SETTINGS_SCREEN_EXTRA);
 +                if (requestedScreen != null && !requestedScreen.isEmpty()) {
++                    hunterDirectLaunchActive = true;
 +                    intent.removeExtra(HUNTER_SETTINGS_SCREEN_EXTRA);
 +                    ListView rootList = getRootPreferenceListView();
 +                    if (rootList != null) {
@@ -5035,6 +5094,21 @@ index 6c36913..bb20000 100644
 +                && YouTubeActivityHook.searchViewController.isSearchActive()) {
 +            toolbar.post(() -> YouTubeActivityHook.searchViewController.closeSearch());
 +        }
++
++        if (hunterDirectLaunchActive) {
++            Preference target = findPreference("morphe_hunter_screen");
++            if (target instanceof PreferenceScreen hunterScreen
++                    && hunterScreen.getDialog() == preferenceScreenDialog) {
++                preferenceScreenDialog.setOnDismissListener(dialog -> {
++                    if (!hunterDirectLaunchActive) return;
++                    hunterDirectLaunchActive = false;
++                    Activity activity = getActivity();
++                    if (activity != null) {
++                        activity.finish();
++                    }
++                });
++            }
++        }
 +    }
 +
 +    /**
@@ -5165,7 +5239,7 @@ index d890d5b..d579002 100644
 +    <string name="morphe_hunter_hide_shorts_title">Ocultar Shorts en búsqueda</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Oculta tarjetas que contienen marcadores conocidos de Shorts</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Exigir marcador de doblaje automático</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.2.0: correlaciona el videoId actual con las pistas reales del Player y mantiene el filtrado estricto en diagnóstico</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.2.1: usa la verificación real del Player para el filtro de doblaje automático; los videos no verificados se descartan</string>
 +
  </resources>
 diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml b/patches/src/main/resources/addresources/values/youtube/strings.xml
@@ -5196,6 +5270,6 @@ index d26795f..b9843b3 100644
 +    <string name="morphe_hunter_hide_shorts_title">Hide Shorts in search</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Hides search cards that contain known Shorts markers</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Require auto-dub marker</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.2.0: correlates the current videoId with the real Player audio tracks and keeps strict filtering in diagnostic mode</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.2.1: uses verified Player audio data for the auto-dub filter; unverified videos are discarded</string>
 +
  </resources>
