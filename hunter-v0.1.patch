@@ -46,7 +46,7 @@ new file mode 100644
 index 0000000..1f47716
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,491 @@
 +/*
 + * YouTube Hunter experimental filter for Morphe.
 + * Diagnostic-first implementation: search results only.
@@ -57,12 +57,10 @@ index 0000000..1f47716
 +import java.util.ArrayDeque;
 +import java.util.Deque;
 +import java.util.concurrent.ConcurrentHashMap;
-+import java.util.concurrent.atomic.AtomicInteger;
 +import java.util.regex.Matcher;
 +import java.util.regex.Pattern;
 +
 +import app.morphe.extension.shared.Logger;
-+import app.morphe.extension.shared.Utils;
 +import app.morphe.extension.shared.patches.components.BufferAsciiStrings;
 +import app.morphe.extension.shared.patches.components.BufferPhraseFilter;
 +import app.morphe.extension.shared.patches.components.ContextInterface;
@@ -74,11 +72,12 @@ index 0000000..1f47716
 +/**
 + * Experimental YouTube Hunter filter.
 + *
-+ * v0.1.5 goals:
++ * v0.1.6 goals:
 + * - Keep duration and Shorts filtering local and realtime.
 + * - Observe Morphe's |badge.e auto-dub signal.
 + * - Correlate child auto-dub badges to recently rendered search cards using the
 + *   actual Litho component path, preferring exact parent-path containment.
++ * - Capture a deep Hunter/YouTube Litho trace that can be exported as a .txt file.
 + * - Keep audio filtering fail-open until path correlation is proven on-device.
 + */
 +@SuppressWarnings("unused")
@@ -86,7 +85,6 @@ index 0000000..1f47716
 +    private static final String TAG = "HUNTER";
 +    private static final long RECENT_CARD_TTL_MS = 2500L;
 +    private static final int MAX_RECENT_CARDS = 16;
-+    private static final int MAX_DIAGNOSTIC_TOASTS = 12;
 +
 +    private final StringFilterGroup searchCards = new StringFilterGroup(
 +            Settings.HUNTER_ENABLED,
@@ -105,11 +103,23 @@ index 0000000..1f47716
 +            "|badge.e"
 +    );
 +
++    // Deep trace only. These components are observed but never filtered by this group.
++    // They reveal the actual YouTube/Litho sequence around result cards, metadata,
++    // badges and audio-related UI without tracing the entire application.
++    private final StringFilterGroup traceComponents = new StringFilterGroup(
++            Settings.HUNTER_DEBUG_LOGS,
++            "metadata.e",
++            "thumbnail.e",
++            "video_metadata.eml",
++            "video-description-ep-identifier",
++            "audio_track",
++            "audio_track_sheet_content"
++    );
++
 +    private static final ConcurrentHashMap<String, Boolean> AUTO_DUB_BY_VIDEO_ID =
 +            new ConcurrentHashMap<>();
 +    private static final ThreadLocal<Deque<RecentCard>> RECENT_SEARCH_CARDS =
 +            ThreadLocal.withInitial(ArrayDeque::new);
-+    private static final AtomicInteger DIAGNOSTIC_TOAST_COUNT = new AtomicInteger();
 +
 +    private static final Pattern DURATION_TOKEN = Pattern.compile(
 +            "(?<![0-9])(?:(\\d{1,2}):)?([0-5]?\\d):([0-5]\\d)(?![0-9])"
@@ -130,7 +140,7 @@ index 0000000..1f47716
 +    };
 +
 +    public HunterFilter() {
-+        addPathCallbacks(searchCards, autoDubBadges);
++        addPathCallbacks(searchCards, autoDubBadges, traceComponents);
 +    }
 +
 +    @Override
@@ -149,6 +159,24 @@ index 0000000..1f47716
 +        final String ascii = asciiStrings.getStrings();
 +        final String decoded = new String(buffer, StandardCharsets.UTF_8);
 +        final String directVideoId = BufferPhraseFilter.extractVideoIdFromBuffer(buffer);
++
++        if (Settings.HUNTER_DEBUG_LOGS.get()) {
++            HunterTraceLog.append(
++                    "LITHO_MATCH",
++                    "group=" + groupName(matchedGroup)
++                            + "\ncontentType=" + contentType
++                            + "\ncontentIndex=" + contentIndex
++                            + "\nidentifier=" + identifier
++                            + "\nvideoId=" + (directVideoId == null ? "?" : directVideoId)
++                            + "\npath=" + path
++                            + "\naccessibility=" + traceText(accessibility, 700)
++                            + "\nascii=" + traceText(ascii, 2200)
++            );
++        }
++
++        if (matchedGroup == traceComponents) {
++            return false;
++        }
 +
 +        if (matchedGroup == autoDubBadges) {
 +            observeAutoDubBadge(path, accessibility, ascii, decoded, directVideoId);
@@ -189,6 +217,7 @@ index 0000000..1f47716
 +
 +        if (Settings.HUNTER_HIDE_SHORTS.get() && isShort) {
 +            Logger.printDebug(() -> TAG + " hide short id=" + directVideoId);
++            traceDecision(directVideoId, "HIDE", "short", autoDub, durationSeconds, path);
 +            return true;
 +        }
 +
@@ -198,6 +227,7 @@ index 0000000..1f47716
 +            Logger.printDebug(() -> TAG
 +                    + " hide duration id=" + directVideoId
 +                    + " duration=" + durationSeconds);
++            traceDecision(directVideoId, "HIDE", "duration", autoDub, durationSeconds, path);
 +            return true;
 +        }
 +
@@ -210,14 +240,16 @@ index 0000000..1f47716
 +            if (autoDub) {
 +                Logger.printDebug(() -> TAG
 +                        + " keep verified auto-dub id=" + directVideoId);
++                traceDecision(directVideoId, "KEEP", "auto_dub_associated", true, durationSeconds, path);
 +                return false;
 +            }
 +
 +            Logger.printDebug(() -> TAG
 +                    + " auto-dub not associated yet id=" + directVideoId
-+                    + "; keeping in diagnostic v0.1.5");
++                    + "; keeping in diagnostic v0.1.6");
 +        }
 +
++        traceDecision(directVideoId, "KEEP", "no_destructive_match", autoDub, durationSeconds, path);
 +        return false;
 +    }
 +
@@ -228,6 +260,15 @@ index 0000000..1f47716
 +
 +        cards.removeIf(card -> videoId.equals(card.videoId));
 +        cards.addLast(new RecentCard(videoId, path, now));
++
++        if (Settings.HUNTER_DEBUG_LOGS.get()) {
++            HunterTraceLog.append(
++                    "CARD_REMEMBER",
++                    "videoId=" + videoId
++                            + "\npath=" + path
++                            + "\nrecentCount=" + cards.size()
++            );
++        }
 +
 +        while (cards.size() > MAX_RECENT_CARDS) {
 +            cards.removeFirst();
@@ -247,10 +288,33 @@ index 0000000..1f47716
 +        String associationSource = "badge-buffer";
 +        RecentCard matchedCard = null;
 +
++        if (Settings.HUNTER_DEBUG_LOGS.get()) {
++            HunterTraceLog.append(
++                    "AUTO_DUB_BADGE",
++                    "directVideoId=" + (directVideoId == null ? "?" : directVideoId)
++                            + "\nbadgePath=" + path
++                            + "\naccessibility=" + traceText(accessibility, 700)
++                            + "\nascii=" + traceText(ascii, 2200)
++            );
++        }
++
 +        if (resolvedVideoId == null) {
 +            Deque<RecentCard> cards = RECENT_SEARCH_CARDS.get();
 +            long now = System.currentTimeMillis();
 +            pruneRecentCards(cards, now);
++
++            if (Settings.HUNTER_DEBUG_LOGS.get()) {
++                for (RecentCard candidate : cards) {
++                    int candidateScore = pathMatchScore(candidate.path, path);
++                    HunterTraceLog.append(
++                            "CORRELATION_CANDIDATE",
++                            "videoId=" + candidate.videoId
++                                    + "\nscore=" + candidateScore
++                                    + "\ncardPath=" + candidate.path
++                                    + "\nbadgePath=" + path
++                    );
++                }
++            }
 +
 +            matchedCard = findBestPathMatch(cards, path);
 +            if (matchedCard != null) {
@@ -277,15 +341,15 @@ index 0000000..1f47716
 +                    + " accessibility=" + truncate(accessibility, 220)
 +                    + " ascii=" + truncate(ascii, 900));
 +
-+            if (DIAGNOSTIC_TOAST_COUNT.getAndIncrement() < MAX_DIAGNOSTIC_TOASTS) {
-+                Utils.showToastShort(
-+                        "Hunter badge "
-+                                + (finalVideoId == null ? "?" : finalVideoId)
-+                                + " [" + finalAssociationSource + "]"
-+                                + " cp=" + pathFingerprint(finalMatchedCard == null ? null : finalMatchedCard.path)
-+                                + " bp=" + pathFingerprint(path)
-+                );
-+            }
++            HunterTraceLog.append(
++                    finalVideoId == null ? "CORRELATION_FAIL" : "CORRELATION_SELECTED",
++                    "videoId=" + (finalVideoId == null ? "?" : finalVideoId)
++                            + "\nsource=" + finalAssociationSource
++                            + "\ncardPath=" + (finalMatchedCard == null ? "?" : finalMatchedCard.path)
++                            + "\nbadgePath=" + path
++                            + "\ncardFingerprint=" + pathFingerprint(finalMatchedCard == null ? null : finalMatchedCard.path)
++                            + "\nbadgeFingerprint=" + pathFingerprint(path)
++            );
 +        }
 +    }
 +
@@ -348,6 +412,13 @@ index 0000000..1f47716
 +        Logger.printDebug(() -> TAG
 +                + " auto-dub associated id=" + videoId
 +                + " source=" + source);
++
++        if (Settings.HUNTER_DEBUG_LOGS.get()) {
++            HunterTraceLog.append(
++                    "AUTO_DUB_ASSOCIATED",
++                    "videoId=" + videoId + "\nsource=" + source
++            );
++        }
 +    }
 +
 +    private static String pathFingerprint(String path) {
@@ -423,6 +494,37 @@ index 0000000..1f47716
 +                : normalized.substring(0, max) + "…";
 +    }
 +
++    private static String groupName(StringFilterGroup group) {
++        if (group == null) return "null";
++        return group.filters.toString();
++    }
++
++    private static String traceText(String value, int max) {
++        if (value == null) return "";
++        String normalized = value.replace('\n', ' ').replace('\r', ' ');
++        return normalized.length() <= max
++                ? normalized
++                : normalized.substring(0, max) + "…";
++    }
++
++    private static void traceDecision(String videoId,
++                                      String decision,
++                                      String reason,
++                                      boolean autoDub,
++                                      int durationSeconds,
++                                      String path) {
++        if (!Settings.HUNTER_DEBUG_LOGS.get()) return;
++        HunterTraceLog.append(
++                "FILTER_DECISION",
++                "videoId=" + (videoId == null ? "?" : videoId)
++                        + "\ndecision=" + decision
++                        + "\nreason=" + reason
++                        + "\nautoDubAssociated=" + autoDub
++                        + "\ndurationSeconds=" + durationSeconds
++                        + "\npath=" + path
++        );
++    }
++
 +    private static final class RecentCard {
 +        final String videoId;
 +        final String path;
@@ -433,6 +535,196 @@ index 0000000..1f47716
 +            this.path = path;
 +            this.seenAtMs = seenAtMs;
 +        }
++    }
++}
++
+diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java
+@@ -0,0 +1,97 @@
++package app.morphe.extension.youtube.patches.components;
++
++import java.text.SimpleDateFormat;
++import java.util.ArrayDeque;
++import java.util.Date;
++import java.util.Deque;
++import java.util.Locale;
++import java.util.concurrent.atomic.AtomicLong;
++
++import app.morphe.extension.shared.Logger;
++
++/**
++ * Dedicated ring-buffer trace for YouTube Hunter.
++ * This intentionally stays separate from Morphe's global debug log so a test run
++ * can be exported without unrelated application noise.
++ */
++@SuppressWarnings("unused")
++public final class HunterTraceLog {
++    private static final int MAX_ENTRIES = 1200;
++    private static final int MAX_ENTRY_CHARS = 5000;
++    private static final Deque<String> ENTRIES = new ArrayDeque<>();
++    private static final AtomicLong SEQUENCE = new AtomicLong();
++
++    private HunterTraceLog() {}
++
++    public static void append(String event, String details) {
++        try {
++            long seq = SEQUENCE.incrementAndGet();
++            long now = System.currentTimeMillis();
++            Thread thread = Thread.currentThread();
++            String timestamp = new SimpleDateFormat(
++                    "yyyy-MM-dd HH:mm:ss.SSS",
++                    Locale.US
++            ).format(new Date(now));
++
++            String safeDetails = details == null ? "" : details;
++            if (safeDetails.length() > MAX_ENTRY_CHARS) {
++                safeDetails = safeDetails.substring(0, MAX_ENTRY_CHARS) + "…";
++            }
++
++            String entry = "#"
++                    + seq
++                    + " "
++                    + timestamp
++                    + " thread="
++                    + thread.getId()
++                    + "/"
++                    + thread.getName()
++                    + " event="
++                    + event
++                    + "\n"
++                    + safeDetails
++                    + "\n---";
++
++            synchronized (ENTRIES) {
++                ENTRIES.addLast(entry);
++                while (ENTRIES.size() > MAX_ENTRIES) {
++                    ENTRIES.removeFirst();
++                }
++            }
++
++            final String logLine = "HUNTER_TRACE " + event + " #" + seq;
++            Logger.printDebug(() -> logLine);
++        } catch (Exception ex) {
++            Logger.printException(() -> "HunterTraceLog.append failure", ex);
++        }
++    }
++
++    public static String exportText() {
++        StringBuilder out = new StringBuilder();
++        out.append("YouTube Hunter deep trace v0.1.6\n");
++        out.append("Entries are chronological. Focus on LITHO_MATCH, AUTO_DUB_BADGE, ")
++                .append("CORRELATION_CANDIDATE, CORRELATION_SELECTED/FAIL and FILTER_DECISION.\n");
++        out.append("============================================================\n");
++
++        synchronized (ENTRIES) {
++            for (String entry : ENTRIES) {
++                out.append(entry).append('\n');
++            }
++        }
++        return out.toString();
++    }
++
++    public static void clear() {
++        synchronized (ENTRIES) {
++            ENTRIES.clear();
++        }
++        SEQUENCE.set(0);
++    }
++
++    public static int size() {
++        synchronized (ENTRIES) {
++            return ENTRIES.size();
++        }
++    }
++}
++
+diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/HunterTracePreference.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/HunterTracePreference.java
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/settings/preference/HunterTracePreference.java
+@@ -0,0 +1,81 @@
++package app.morphe.extension.youtube.settings.preference;
++
++import android.content.Context;
++import android.preference.Preference;
++import android.util.AttributeSet;
++
++import app.morphe.extension.shared.Logger;
++import app.morphe.extension.shared.Utils;
++import app.morphe.extension.shared.settings.preference.AbstractPreferenceFragment;
++import app.morphe.extension.youtube.patches.components.HunterTraceLog;
++
++/**
++ * Export/clear controls for the dedicated Hunter trace.
++ * Behavior is selected by the preference key so one implementation handles both buttons.
++ */
++@SuppressWarnings({"unused", "deprecation"})
++public class HunterTracePreference extends Preference implements Preference.OnPreferenceClickListener {
++
++    public HunterTracePreference(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
++        super(context, attrs, defStyleAttr, defStyleRes);
++        init();
++    }
++
++    public HunterTracePreference(Context context, AttributeSet attrs, int defStyleAttr) {
++        super(context, attrs, defStyleAttr);
++        init();
++    }
++
++    public HunterTracePreference(Context context, AttributeSet attrs) {
++        super(context, attrs);
++        init();
++    }
++
++    public HunterTracePreference(Context context) {
++        super(context);
++        init();
++    }
++
++    private void init() {
++        setOnPreferenceClickListener(this);
++    }
++
++    @Override
++    public boolean onPreferenceClick(Preference preference) {
++        try {
++            String key = preference.getKey();
++            if ("morphe_hunter_clear_trace".equals(key)) {
++                HunterTraceLog.clear();
++                Utils.showToastShort("Hunter: registro de depuración limpiado");
++                return true;
++            }
++
++            String text = HunterTraceLog.exportText();
++            if (HunterTraceLog.size() == 0) {
++                Utils.showToastShort("Hunter: no hay eventos para exportar");
++                return true;
++            }
++
++            AbstractPreferenceFragment fragment = AbstractPreferenceFragment.instance.get();
++            if (fragment == null) {
++                Utils.showToastShort("Hunter: no se pudo abrir el selector de archivo");
++                return true;
++            }
++
++            fragment.exportTextActivity(
++                    AbstractPreferenceFragment.exportFileName("Hunter_Trace"),
++                    text,
++                    success -> Utils.showToastLong(
++                            success
++                                    ? "Hunter: log TXT exportado"
++                                    : "Hunter: falló la exportación del log"
++                    )
++            );
++        } catch (Exception ex) {
++            Logger.printException(() -> "HunterTracePreference failure", ex);
++            Utils.showToastShort("Hunter: error al exportar el log");
++        }
++        return true;
 +    }
 +}
 +
@@ -459,7 +751,7 @@ new file mode 100644
 index 0000000..3a63c3c
 --- /dev/null
 +++ b/patches/src/main/kotlin/app/morphe/patches/youtube/hunter/YouTubeHunterPatch.kt
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,67 @@
 +/*
 + * YouTube Hunter experimental patch for Morphe.
 + */
@@ -468,6 +760,7 @@ index 0000000..3a63c3c
 +import app.morphe.patcher.patch.bytecodePatch
 +import app.morphe.patches.shared.misc.litho.filter.addLithoFilter
 +import app.morphe.patches.shared.misc.settings.preference.InputType
++import app.morphe.patches.shared.misc.settings.preference.NonInteractivePreference
 +import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference
 +import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference.Sorting
 +import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
@@ -503,6 +796,16 @@ index 0000000..3a63c3c
 +                preferences = setOf(
 +                    SwitchPreference("morphe_hunter_enabled", summary = true),
 +                    SwitchPreference("morphe_hunter_debug_logs", summary = true),
++                    NonInteractivePreference(
++                        key = "morphe_hunter_export_trace",
++                        tag = "app.morphe.extension.youtube.settings.preference.HunterTracePreference",
++                        selectable = true
++                    ),
++                    NonInteractivePreference(
++                        key = "morphe_hunter_clear_trace",
++                        tag = "app.morphe.extension.youtube.settings.preference.HunterTracePreference",
++                        selectable = true
++                    ),
 +                    TextPreference(
 +                        "morphe_hunter_min_duration_minutes",
 +                        inputType = InputType.NUMBER
@@ -520,7 +823,7 @@ diff --git a/patches/src/main/resources/addresources/values-es-rES/youtube/strin
 index d890d5b..d579002 100644
 --- a/patches/src/main/resources/addresources/values-es-rES/youtube/strings.xml
 +++ b/patches/src/main/resources/addresources/values-es-rES/youtube/strings.xml
-@@ -1281,4 +1281,19 @@ La reproducción de vídeo con AV1 se puede atascar o perder fotogramas."</strin
+@@ -1281,4 +1281,23 @@ La reproducción de vídeo con AV1 se puede atascar o perder fotogramas."</strin
    <string name="morphe_restore_old_video_action_bar_summary">"Corrige que no se muestren los 'No me gusta' y que no se puedan ocultar los botones de acción de vídeo
  
  Limitaciones: Vuelve al antiguo estilo de superposición de 'Más vídeos'"</string>
@@ -531,20 +834,24 @@ index d890d5b..d579002 100644
 +    <string name="morphe_hunter_enabled_title">Activar YouTube Hunter</string>
 +    <string name="morphe_hunter_enabled_summary">Hunter actúa únicamente sobre las tarjetas de resultados de búsqueda</string>
 +    <string name="morphe_hunter_debug_logs_title">Registros de diagnóstico Hunter</string>
-+    <string name="morphe_hunter_debug_logs_summary">Registra ID, posibles duraciones, señales de Shorts y marcadores de doblaje automático</string>
++    <string name="morphe_hunter_debug_logs_summary">Registro profundo: captura la secuencia Litho relevante, IDs, rutas, metadata, badges, señales de audio y decisiones de Hunter</string>
++    <string name="morphe_hunter_export_trace_title">Exportar log Hunter (.txt)</string>
++    <string name="morphe_hunter_export_trace_summary">Guarda el registro profundo de esta prueba en un archivo TXT para analizar la secuencia exacta</string>
++    <string name="morphe_hunter_clear_trace_title">Limpiar log Hunter</string>
++    <string name="morphe_hunter_clear_trace_summary">Borra los eventos acumulados antes de iniciar una prueba nueva</string>
 +    <string name="morphe_hunter_min_duration_minutes_title">Duración mínima (minutos)</string>
 +    <string name="morphe_hunter_min_duration_minutes_summary">0 desactiva el filtro. Las duraciones desconocidas se conservan durante la fase experimental</string>
 +    <string name="morphe_hunter_hide_shorts_title">Ocultar Shorts en búsqueda</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Oculta tarjetas que contienen marcadores conocidos de Shorts</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Exigir marcador de doblaje automático</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.5: correlaciona el badge de doblaje automático con la tarjeta usando la ruta real de Litho. Las asociaciones desconocidas se conservan durante el diagnóstico</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.6: registra la secuencia real de Litho y correlaciona badges con tarjetas. Las asociaciones desconocidas se conservan durante el diagnóstico</string>
 +
  </resources>
 diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml b/patches/src/main/resources/addresources/values/youtube/strings.xml
 index d26795f..b9843b3 100644
 --- a/patches/src/main/resources/addresources/values/youtube/strings.xml
 +++ b/patches/src/main/resources/addresources/values/youtube/strings.xml
-@@ -1412,4 +1412,19 @@ Video playback with AV1 may stutter or drop frames."</string>
+@@ -1412,4 +1412,23 @@ Video playback with AV1 may stutter or drop frames."</string>
      <string name="morphe_restore_old_video_action_bar_summary">"Fixes dislikes not shown and video action buttons cannot be hidden
  
  Limitation: Reverts to old style \'More videos\' overlay"</string>
@@ -555,12 +862,16 @@ index d26795f..b9843b3 100644
 +    <string name="morphe_hunter_enabled_title">Enable YouTube Hunter</string>
 +    <string name="morphe_hunter_enabled_summary">Runs Hunter only on YouTube search result cards</string>
 +    <string name="morphe_hunter_debug_logs_title">Hunter diagnostic logs</string>
-+    <string name="morphe_hunter_debug_logs_summary">Logs video id, duration candidates, Shorts signals and auto-dub markers for search cards</string>
++    <string name="morphe_hunter_debug_logs_summary">Deep trace: records relevant Litho sequence, IDs, paths, metadata, badges, audio signals and Hunter decisions</string>
++    <string name="morphe_hunter_export_trace_title">Export Hunter log (.txt)</string>
++    <string name="morphe_hunter_export_trace_summary">Save the deep trace from this test as a TXT file for exact sequence analysis</string>
++    <string name="morphe_hunter_clear_trace_title">Clear Hunter log</string>
++    <string name="morphe_hunter_clear_trace_summary">Clear accumulated events before starting a new test</string>
 +    <string name="morphe_hunter_min_duration_minutes_title">Minimum duration (minutes)</string>
 +    <string name="morphe_hunter_min_duration_minutes_summary">0 disables the duration filter. Unknown durations are kept during the experimental phase</string>
 +    <string name="morphe_hunter_hide_shorts_title">Hide Shorts in search</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Hides search cards that contain known Shorts markers</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Require auto-dub marker</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.5: correlates the auto-dub badge to its card using the real Litho component path. Unknown associations remain visible during diagnostics</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.1.6: records the real Litho sequence and correlates badges to cards. Unknown associations remain visible during diagnostics</string>
 +
  </resources>
