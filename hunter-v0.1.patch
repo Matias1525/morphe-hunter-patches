@@ -46,7 +46,7 @@ new file mode 100644
 index 0000000..1f47716
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,213 @@
 +/*
 + * YouTube Hunter experimental filter for Morphe.
 + * Diagnostic-first implementation: search results only.
