@@ -82,7 +82,7 @@ index 0000000..4444444
 +/**
 + * Diagnostic bridge used by YouTube Hunter to inspect and correlate the real player audio-track model.
 + *
-+ * v0.2.1 binds audioTracks[] to YouTube's authoritative current-playing video ID supplied by
++ * v0.3.0 binds audioTracks[] to YouTube's authoritative current-playing video ID supplied by
 + * VideoInformation.setVideoId(). Player-response IDs are recorded as secondary diagnostics only,
 + * because YouTube can prefetch a different response while the current player remains unchanged.
 + */
@@ -429,10 +429,10 @@ index 0000000..4444444
 +
 diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
 new file mode 100644
-index 0000000..1f47717
+index 0000000..1f47718
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterFilter.java
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,676 @@
 +/*
 + * YouTube Hunter experimental filter for Morphe.
 + * Diagnostic-first implementation: search results only.
@@ -459,7 +459,7 @@ index 0000000..1f47717
 +/**
 + * Experimental YouTube Hunter filter.
 + *
-+ * v0.2.1 goals:
++ * v0.3.0 diagnostic goals:
 + * - Keep duration and Shorts filtering local and realtime.
 + * - Observe Morphe's |badge.e auto-dub signal.
 + * - Correlate child auto-dub badges to recently rendered search cards using the
@@ -469,6 +469,8 @@ index 0000000..1f47717
 + * - Treat only a real badge component as auto-dub evidence; never generic card-buffer icons.
 + * - When the explicit auto-dub filter is enabled, use only verified Player audio cache evidence.
 + * - Unknown/unverified candidate videos fail closed; badge association stays diagnostic only.
++ * - Exhaustively trace Search Litho components and raw buffers while diagnostics are enabled.
++ * - Inventory suspicious audio/dub/player/continuation markers instead of assuming field names.
 + */
 +@SuppressWarnings("unused")
 +public final class HunterFilter extends Filter {
@@ -491,6 +493,13 @@ index 0000000..1f47717
 +    private final StringFilterGroup autoDubBadges = new StringFilterGroup(
 +            Settings.HUNTER_ENABLED,
 +            "|badge.e"
++    );
++
++    // Broad Search diagnostic hook. Most Litho paths contain '|'; the callback itself
++    // gates on the Search surface, so Home/feed/Player remain observation-neutral here.
++    private final StringFilterGroup allSearchComponents = new StringFilterGroup(
++            Settings.HUNTER_DEBUG_LOGS,
++            "|"
 +    );
 +
 +    // Deep trace only. These components are observed but never filtered by this group.
@@ -530,7 +539,7 @@ index 0000000..1f47717
 +    };
 +
 +    public HunterFilter() {
-+        addPathCallbacks(searchCards, autoDubBadges, traceComponents);
++        addPathCallbacks(searchCards, autoDubBadges, traceComponents, allSearchComponents);
 +    }
 +
 +    @Override
@@ -552,6 +561,23 @@ index 0000000..1f47717
 +        final String surface = searchSurface
 +                ? "SEARCH"
 +                : detectNonSearchSurface(path, ascii, accessibility);
++
++        if (matchedGroup == allSearchComponents) {
++            if (searchSurface) {
++                traceRawSearchComponent(
++                        identifier,
++                        accessibility,
++                        path,
++                        buffer,
++                        ascii,
++                        decoded,
++                        directVideoId,
++                        contentType,
++                        contentIndex
++                );
++            }
++            return false;
++        }
 +
 +        if ("PLAYER".equals(surface) && directVideoId != null) {
 +            HunterAudioTrackBridge.setCurrentVideoId(directVideoId);
@@ -688,6 +714,61 @@ index 0000000..1f47717
 +
 +        traceDecision(directVideoId, "KEEP", "no_destructive_match", autoDubBadgeAssociated, durationSeconds, path);
 +        return false;
++    }
++
++    private static void traceRawSearchComponent(String identifier,
++                                                String accessibility,
++                                                String path,
++                                                byte[] buffer,
++                                                String ascii,
++                                                String decoded,
++                                                String directVideoId,
++                                                FilterContentType contentType,
++                                                int contentIndex) {
++        final String combined = (ascii == null ? "" : ascii)
++                + "\n"
++                + (decoded == null ? "" : decoded)
++                + "\n"
++                + (accessibility == null ? "" : accessibility)
++                + "\n"
++                + (path == null ? "" : path);
++
++        HunterTraceLog.append(
++                "SEARCH_COMPONENT_RAW",
++                "videoId=" + (directVideoId == null ? "?" : directVideoId)
++                        + "\nidentifier=" + identifier
++                        + "\ncontentType=" + contentType
++                        + "\ncontentIndex=" + contentIndex
++                        + "\nbufferLength=" + (buffer == null ? -1 : buffer.length)
++                        + "\nbufferHash=" + (buffer == null ? 0 : java.util.Arrays.hashCode(buffer))
++                        + "\nmarkers=" + searchMarkerInventory(combined)
++                        + "\npath=" + traceText(path, 1800)
++                        + "\naccessibility=" + traceText(accessibility, 1800)
++                        + "\nascii=" + traceText(ascii, 9000)
++        );
++    }
++
++    private static String searchMarkerInventory(String value) {
++        if (value == null || value.isEmpty()) return "none";
++
++        final String lower = value.toLowerCase(java.util.Locale.ROOT);
++        final String[] markers = {
++                "audio", "audio_track", "audiotrack", "isautodubbed",
++                "auto_dub", "autodub", "dubbed", "dubbing", "doblado", "doblaje",
++                "es-us", "es-es", "es.", ".10", ".4",
++                "yt_outline_person_radar", "yt_outline_experimental_person_waves",
++                "player", "playerresponse", "watch", "next", "browse",
++                "searchr", "continuation", "innertube", "youtubei"
++        };
++
++        StringBuilder found = new StringBuilder();
++        for (String marker : markers) {
++            if (lower.contains(marker.toLowerCase(java.util.Locale.ROOT))) {
++                if (found.length() > 0) found.append(',');
++                found.append(marker);
++            }
++        }
++        return found.length() == 0 ? "none" : found.toString();
 +    }
 +
 +    private static void rememberSearchCard(String videoId, String path) {
@@ -1030,7 +1111,7 @@ index 0000000..1f47717
 +}
 diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java
 new file mode 100644
-index 0000000..1111112
+index 0000000..1111113
 --- /dev/null
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/components/HunterTraceLog.java
 @@ -0,0 +1,104 @@
@@ -1053,8 +1134,8 @@ index 0000000..1111112
 + */
 +@SuppressWarnings("unused")
 +public final class HunterTraceLog {
-+    private static final int MAX_ENTRIES = 1200;
-+    private static final int MAX_ENTRY_CHARS = 5000;
++    private static final int MAX_ENTRIES = 3000;
++    private static final int MAX_ENTRY_CHARS = 12000;
 +    private static final Deque<String> ENTRIES = new ArrayDeque<>();
 +    private static final AtomicLong SEQUENCE = new AtomicLong();
 +
@@ -1105,9 +1186,9 @@ index 0000000..1111112
 +
 +    public static String exportText() {
 +        StringBuilder out = new StringBuilder();
-+        out.append("YouTube Hunter deep trace v0.2.1\n");
++        out.append("YouTube Hunter deep trace v0.3.0\n");
 +        out.append("Entries are chronological. Focus on LITHO_MATCH, AUTO_DUB_BADGE, ")
-+                .append("CORRELATION_CANDIDATE, CORRELATION_SELECTED/FAIL, FILTER_DECISION and AUDIO_FILTER_DECISION.\n");
++                .append("SEARCH_COMPONENT_RAW, LITHO_MATCH, AUTO_DUB_BADGE, CORRELATION_CANDIDATE, CORRELATION_SELECTED/FAIL, FILTER_DECISION, AUDIO_FILTER_DECISION and PLAYER_* events.\n");
 +        out.append("============================================================\n");
 +
 +        synchronized (ENTRIES) {
@@ -1238,10 +1319,10 @@ index a6ef388..a6ef389 100644
                  ).forEach { (matchIndex, methodName) ->
                      val fieldInstruction = instructionMatches[matchIndex].instruction
 diff --git a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/VideoInformation.java b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/VideoInformation.java
-index bbe15fe..cc20000 100644
+index bbe15fe..cc30000 100644
 --- a/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/VideoInformation.java
 +++ b/extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/VideoInformation.java
-@@ -1,1108 +1,1112 @@
+@@ -1,1108 +1,1131 @@
 -/*
 - * Copyright 2026 Morphe.
 - * https://github.com/MorpheApp/morphe-patches
@@ -2381,6 +2462,7 @@ index bbe15fe..cc20000 100644
 +import app.morphe.extension.shared.patches.HunterAudioTrackBridge;
 +import app.morphe.extension.shared.patches.components.ContextInterface;
 +import app.morphe.extension.youtube.patches.voiceovertranslation.VoiceOverTranslationPatch;
++import app.morphe.extension.youtube.patches.components.HunterTraceLog;
 +import app.morphe.extension.youtube.shared.Event;
 +import app.morphe.extension.youtube.shared.PlayerType;
 +import app.morphe.extension.youtube.shared.ShortsPlayerState;
@@ -2591,6 +2673,11 @@ index bbe15fe..cc20000 100644
 +        try {
 +            Logger.printDebug(() -> "newVideoStarted");
 +            HunterAudioTrackBridge.onPlayerInitialize();
++            HunterTraceLog.append(
++                    "PLAYER_INITIALIZE",
++                    "videoId=" + getVideoId()
++                            + "\nplayerResponseVideoId=" + getPlayerResponseVideoId()
++            );
 +
 +            playerControllerRef = new WeakReference<>(Objects.requireNonNull(playerController));
 +            videoLength = 0;
@@ -2694,6 +2781,12 @@ index bbe15fe..cc20000 100644
 +     */
 +    public static void setVideoId(@NonNull String newlyLoadedVideoId) {
 +        HunterAudioTrackBridge.observePlaybackVideoId(newlyLoadedVideoId);
++        HunterTraceLog.append(
++                "PLAYBACK_VIDEO_ID_OBSERVED",
++                "videoId=" + newlyLoadedVideoId
++                        + "\nplayerResponseVideoId=" + getPlayerResponseVideoId()
++                        + "\nthread=" + Thread.currentThread().getName()
++        );
 +        if (!videoId.equals(newlyLoadedVideoId)) {
 +            Logger.printDebug(() -> "New video ID: " + newlyLoadedVideoId);
 +            videoId = newlyLoadedVideoId;
@@ -2747,6 +2840,13 @@ index bbe15fe..cc20000 100644
 +     */
 +    public static void setPlayerResponseVideoId(@NonNull String videoId, boolean isShortAndOpeningOrPlaying) {
 +        HunterAudioTrackBridge.observePlayerResponseVideoId(videoId);
++        HunterTraceLog.append(
++                "PLAYER_RESPONSE_OBSERVED",
++                "videoId=" + videoId
++                        + "\ncurrentPlaybackVideoId=" + getVideoId()
++                        + "\nisShortAndOpeningOrPlaying=" + isShortAndOpeningOrPlaying
++                        + "\nthread=" + Thread.currentThread().getName()
++        );
 +        if (!playerResponseVideoId.equals(videoId)) {
 +            Logger.printDebug(() -> "New player response video ID: " + videoId);
 +            playerResponseVideoId = videoId;
@@ -5239,7 +5339,7 @@ index d890d5b..d579002 100644
 +    <string name="morphe_hunter_hide_shorts_title">Ocultar Shorts en búsqueda</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Oculta tarjetas que contienen marcadores conocidos de Shorts</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Exigir marcador de doblaje automático</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.2.1: usa la verificación real del Player para el filtro de doblaje automático; los videos no verificados se descartan</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.3.0 diagnóstico: Search se instrumenta en profundidad; el filtro sigue usando sólo evidencia verificada del Player</string>
 +
  </resources>
 diff --git a/patches/src/main/resources/addresources/values/youtube/strings.xml b/patches/src/main/resources/addresources/values/youtube/strings.xml
@@ -5270,6 +5370,6 @@ index d26795f..b9843b3 100644
 +    <string name="morphe_hunter_hide_shorts_title">Hide Shorts in search</string>
 +    <string name="morphe_hunter_hide_shorts_summary">Hides search cards that contain known Shorts markers</string>
 +    <string name="morphe_hunter_require_auto_dub_title">Require auto-dub marker</string>
-+    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.2.1: uses verified Player audio data for the auto-dub filter; unverified videos are discarded</string>
++    <string name="morphe_hunter_require_auto_dub_summary">Experimental v0.3.0 diagnostic: Search is deeply instrumented; filtering still trusts only verified Player evidence</string>
 +
  </resources>
